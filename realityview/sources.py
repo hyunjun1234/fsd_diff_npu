@@ -251,7 +251,12 @@ def open_replay_sources(folder: str, cams: list[Camera]) -> list:
     import os
 
     from .mjpeg import has_mjpeg, open_mjpeg_sources, segment_dirs
+    from .multicam import has_timed_videos, open_timed_videos
 
+    if has_timed_videos(folder, len(cams)):
+        # 합성 4대 장면(scripts/make_sim4.py): cam{번호}.mp4 + cam{번호}.csv. 카메라마다 시각과 프레임 수가 달라
+        # run_demo.py가 --sync(FrameSyncer)로 묶어 읽는다
+        return open_timed_videos(folder, cams)
     if any(all(has_mjpeg(d, c.name) for c in cams) for d in segment_dirs(folder) if os.path.isdir(d)):
         return open_mjpeg_sources(folder, cams)
     return [ReplaySource(folder, c.name, c.width, c.height) for c in cams]
@@ -260,11 +265,54 @@ def open_replay_sources(folder: str, cams: list[Camera]) -> list:
 # ---------------------------------------------------------------------------
 # 설정에서 입력 장치 열기
 # ---------------------------------------------------------------------------
-def open_source(cam: Camera, override: dict | None = None):
+def open_source(cam: Camera, override: dict | None = None, hubs: dict | None = None):
+    """설정의 source 항목으로 입력 장치를 연다.
+
+    type 값
+      picamera2 : CSI 카메라(Picamera2)
+      opencv    : 예전 방식 OpenCV 입력(장치 번호나 파일). 시각을 붙이지 않는다
+      usb       : USB UVC 카메라(realityview/multicam.py UsbCameraSource). device는 번호나
+                  /dev/v4l/by-id/... 경로. 받은 시각을 time.monotonic_ns()로 붙인다
+      video     : 동영상 파일을 가짜 USB 카메라로(uri, fps 속도로 내보내고 끝나면 처음부터)
+      quad      : 쿼드 키트 칸 하나(group, tile, lag_frames, inner). 같은 group의 카메라는 hubs로 장치를 나눠 쓴다
+    """
     src = dict(cam.source)
     if override:
         src.update(override)
     kind = src.get("type", "opencv")
+    if kind in ("usb", "video"):
+        from .multicam import UsbCameraSource
+
+        if kind == "usb":
+            return UsbCameraSource(
+                src.get("device", 0),
+                cam.width,
+                cam.height,
+                fps=src.get("fps"),
+                timestamp_offset_ms=float(src.get("timestamp_offset_ms", 0.0)),
+                fourcc=src.get("fourcc"),
+            )
+        return UsbCameraSource(
+            src["uri"], cam.width, cam.height, pace_fps=float(src.get("fps", 15)), loop=bool(src.get("loop", True)),
+            timestamp_offset_ms=float(src.get("timestamp_offset_ms", 0.0)),
+        )
+    if kind == "quad":
+        import dataclasses
+
+        from .multicam import QuadSplitSource
+
+        hubs = {} if hubs is None else hubs
+        group = src.get("group", "quad0")
+        if group not in hubs:
+            # 같은 group의 첫 카메라가 키트 장치를 연다. 합쳐진 영상 크기 기본값은 칸 크기의 2배
+            inner = dict(src.get("inner") or {"type": "picamera2", "index": 0})
+            iw = int(inner.pop("width", 2 * cam.width))
+            ih = int(inner.pop("height", 2 * cam.height))
+            inner_cam = dataclasses.replace(cam, name=f"{group}_raw", width=iw, height=ih, source=inner)
+            hubs[group] = QuadSplitSource(
+                open_source(inner_cam), align=bool(src.get("align", True)), frame_period_ms=src.get("frame_period_ms")
+            )
+        return hubs[group].view(int(src.get("tile", 0)), int(src.get("lag_frames", 0)), (cam.width, cam.height))
     if kind == "picamera2":
         return PiCameraSource(
             int(src.get("index", 0)),

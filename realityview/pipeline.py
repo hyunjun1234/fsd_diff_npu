@@ -239,6 +239,7 @@ class RealityViewPipeline:
         view3d: View3DConfig | None = None,  # 3D 시점 설정(없으면 기본값)
         ground_every: int = 1,  # 3D 바닥(IPM 텍스처)을 몇 프레임마다 다시 만들지. 1이면 매 프레임
         tracker: str = "basic",  # 추적기 방식: "basic"(기본, 예전과 같음), "robust"(먼 물체 ID 쪼개짐 개선판)
+        skew_comp: bool = False,  # True면 step()에 준 카메라별 시각 차이만큼 물체 위치를 트랙 속도로 옮긴다(기본 꺼짐)
     ):
         self.cameras = cameras
         self.scale = float(scale)
@@ -246,6 +247,7 @@ class RealityViewPipeline:
         self.grid = grid or BevGrid()
         self.ipm = IpmCompositor(cameras, self.grid)
         self.tracker = BevTracker(scale=self.scale, mode=tracker)
+        self.skew_comp = bool(skew_comp)
         self.show_ground = show_ground
         self.show_cameras = show_cameras
         self.timer = timer or StageTimer(enabled=False)
@@ -313,7 +315,12 @@ class RealityViewPipeline:
         }
 
     # ---- 한 프레임 처리 -------------------------------------------------
-    def step(self, frames: list[np.ndarray], dt: float) -> StepOutput:
+    def step(self, frames: list[np.ndarray], dt: float, cam_offsets_s: list[float] | None = None) -> StepOutput:
+        """한 프레임을 처리한다.
+
+        cam_offsets_s: 카메라별 "이 영상의 시각 - 기준 시각"(초). FrameSyncer 묶음의 offsets_s.
+          skew_comp=True일 때만 쓰고, 없거나 꺼져 있으면 예전과 똑같이 처리한다.
+        """
         tm = self.timer
         t0 = time.perf_counter()
         idx = self._frame_idx
@@ -337,6 +344,13 @@ class RealityViewPipeline:
             objs = []
             for i, (cam, r) in enumerate(zip(self.cameras, results)):
                 objs += project_detections(i, cam, r.detections, max_range=40.0 * self.scale, scale=self.scale)
+
+        # 2-1) 시각 맞춤 보정(옵션): 기준보다 앞뒤로 찍힌 카메라의 물체를 기준 시각 위치로 옮긴다
+        if self.skew_comp and cam_offsets_s is not None:
+            from .multicam import compensate_offsets
+
+            with tm.stage("skew_comp"):
+                objs = compensate_offsets(objs, self.tracker.tracks, cam_offsets_s, float(dt), self.tracker.gate)
 
         # 3) 카메라 경계에서 겹친 같은 물체 합치기
         with tm.stage("merge"):

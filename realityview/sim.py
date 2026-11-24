@@ -99,30 +99,64 @@ class SimWorld:
         img[road] = np.clip(img[road].astype(np.int16) + noise[road, None], 0, 255).astype(np.uint8)
         return img
 
+    # ---- 시각을 직접 정하기(카메라마다 다른 시각에 찍는 4대 시뮬레이션용) -------------
+    def set_time(self, t: float) -> None:
+        """물체와 자차를 시각 t(초)의 상태로 바로 옮긴다.
+
+        step()은 dt만큼 차례로 움직이지만, 카메라마다 찍는 시각이 다른 장면을 만들려면 아무 시각으로나
+        오갈 수 있어야 한다. 위치 = 처음 위치 + 속도 x t 이고, x가 -35~45 m를 벗어나면 80 m씩 돌려
+        반대편에 다시 나온다(step()의 다시 등장과 같은 범위, 넘친 거리는 남긴다).
+        처음 위치는 이 함수를 처음 부를 때의 위치다. 이 함수를 쓴 뒤 step()을 섞어 쓰지 않는다.
+        """
+        if not hasattr(self, "_t0_state"):
+            self._t0_state = [(o.x, o.y) for o in self.objects]
+        self.t = float(t)
+        self.s = self.ego_speed * self.t
+        for i, (o, (x0, y0)) in enumerate(zip(self.objects, self._t0_state)):
+            x = x0 + o.vx * self.t
+            k = int(np.floor((x + 35.0) / 80.0))
+            o.x = x - 80.0 * k
+            o.y = y0 + o.vy * self.t
+            self.wraps[i] = abs(k)
+
     def render(self) -> list[np.ndarray]:
         frames, self.gt, self.gt_ids, self.gt_masks = [], [], [], []
-        for cam, (xy, valid) in zip(self.cameras, self._rays):
-            img = self._ground_color(xy[..., 0], xy[..., 1])
-            img[~valid] = SKY
-            occl = np.zeros(img.shape[:2], np.uint8)
-            dets, ids = [], []
-            # 먼 물체부터 그려서 가까운 물체가 위에 덮이게 한다(번호는 objects 순서 그대로 기억)
-            order = sorted(
-                range(len(self.objects)),
-                key=lambda i: -np.hypot(self.objects[i].x - cam.position[0], self.objects[i].y - cam.position[1]),
-            )
-            for i in order:
-                o = self.objects[i]
-                box = self._draw_object(img, cam, o, occl)
-                if box is not None:
-                    dets.append(Detection(o.label, 0.9, box))
-                    ids.append(i)
-            road = valid & (np.abs(xy[..., 1]) <= ROAD_HALF) & (occl == 0)
-            self.gt_masks.append(road.astype(np.uint8))
+        for k in range(len(self.cameras)):
+            img, dets, ids, road = self.render_camera(k)
+            self.gt_masks.append(road)
             frames.append(img)
             self.gt.append(dets)
             self.gt_ids.append(ids)
         return frames
+
+    def render_camera(self, k: int, ground: bool = True):
+        """카메라 k 한 대만 지금 상태로 그린다. (영상, 정답 상자, 물체 번호, 도로 마스크)를 돌려준다.
+
+        ground=False면 바닥 무늬를 칠하지 않는다(정답 상자만 필요할 때 빠르게. 상자 값은 같다).
+        """
+        cam = self.cameras[k]
+        xy, valid = self._rays[k]
+        if ground:
+            img = self._ground_color(xy[..., 0], xy[..., 1])
+            img[~valid] = SKY
+        else:
+            img = np.empty((cam.height, cam.width, 3), np.uint8)
+            img[:] = SKY
+        occl = np.zeros(img.shape[:2], np.uint8)
+        dets, ids = [], []
+        # 먼 물체부터 그려서 가까운 물체가 위에 덮이게 한다(번호는 objects 순서 그대로 기억)
+        order = sorted(
+            range(len(self.objects)),
+            key=lambda i: -np.hypot(self.objects[i].x - cam.position[0], self.objects[i].y - cam.position[1]),
+        )
+        for i in order:
+            o = self.objects[i]
+            box = self._draw_object(img, cam, o, occl)
+            if box is not None:
+                dets.append(Detection(o.label, 0.9, box))
+                ids.append(i)
+        road = valid & (np.abs(xy[..., 1]) <= ROAD_HALF) & (occl == 0)
+        return img, dets, ids, road.astype(np.uint8)
 
     def _draw_object(self, img: np.ndarray, cam: Camera, o: SimObject, occl: np.ndarray):
         L, W, Hh = o.length / 2, o.width / 2, o.height
@@ -175,6 +209,49 @@ class SimBackend:
 
     def close(self) -> None:
         pass
+
+
+# ---------------------------------------------------------------------------
+# 카메라별 촬영 시각 만들기(시각 어긋남, 흔들림, 프레임 누락)
+# ---------------------------------------------------------------------------
+def camera_timelines(
+    n_cams: int,
+    frames: int,
+    fps: float,
+    skew_ms: list[float],
+    drop: list[float],
+    jitter_ms: list[float],
+    seed: int = 0,
+) -> list[list[tuple[int, float]]]:
+    """카메라마다 (시뮬레이션 프레임 번호, 찍은 시각 초) 목록을 만든다.
+
+    카메라 k의 n번째 프레임 시각 = n / fps + skew_ms[k] + 정규분포 흔들림(jitter_ms[k]).
+    drop[k] 확률로 그 프레임을 뺀다(USB 카메라가 프레임을 놓친 것처럼). 기준 카메라(0번)는 빼지 않는 편이
+    비교하기 쉬우므로 drop[0]은 보통 0으로 둔다. 같은 seed면 늘 같은 결과다.
+    """
+    rng = np.random.default_rng(seed)
+    out = []
+    for k in range(n_cams):
+        tl = []
+        for n in range(frames):
+            j = rng.normal(0.0, jitter_ms[k]) if jitter_ms[k] > 0 else 0.0
+            dropped = drop[k] > 0 and rng.random() < drop[k]
+            if not dropped:
+                tl.append((n, n / fps + (skew_ms[k] + j) / 1e3))
+        out.append(tl)
+    return out
+
+
+def per_camera(values: str | None, n: int, default: float = 0.0) -> list[float]:
+    """'0,0,20,50' 같은 쉼표 문자열을 카메라 수만큼의 숫자 목록으로. 값 하나면 모든 카메라에 같게."""
+    if not values:
+        return [default] * n
+    v = [float(x) for x in str(values).split(",") if x.strip()]
+    if len(v) == 1:
+        return v * n
+    if len(v) != n:
+        raise ValueError(f"카메라 {n}대에 값 {len(v)}개가 왔습니다: {values}")
+    return v
 
 
 # ---------------------------------------------------------------------------

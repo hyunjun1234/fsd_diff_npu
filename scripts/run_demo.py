@@ -58,6 +58,15 @@ from realityview.profiling import (  # noqa: E402
 #       --replay out/drives/20261125_101500 --headless --duration 25 --trigger-clips --shadow \
 #       --shadow-csv out/measure/shadow.csv --health-csv out/measure/shadow_health.csv --health-interval 10 --hailo-stop-temp 95
 #
+#   # 카메라 4대: 합성 4대 장면 파일(scripts/make_sim4.py)을 시각으로 묶어 재생, 정답 상자를 검출처럼 씀
+#   python scripts/run_demo.py --config configs/four_cam.yaml --backend gt --replay out/sim4 --headless \
+#       --view both --tracker robust --frames 200 --save out/video/sim4_replay.mp4
+#
+#   # 카메라마다 시각이 다를 때(CSI + USB 섞음) 기준 카메라 시각에 가장 가까운 프레임끼리 묶기
+#   timeout -s INT -k 10 40 python scripts/run_demo.py --config configs/four_cam_mixed.yaml --backend hailo \
+#       --sync --sync-csv out/measure/sync.csv --headless --duration 20 --profile \
+#       --health-csv out/measure/health.csv --health-interval 10 --hailo-stop-temp 95
+#
 #   # PC에서 녹화 영상으로 개발 (ultralytics 필요)
 #   python scripts/run_demo.py --backend ultralytics --video front=rec/front.mp4 --video rear=rec/rear.mp4
 
@@ -68,7 +77,12 @@ from realityview.profiling import (  # noqa: E402
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="configs/two_cam.yaml")
-    ap.add_argument("--backend", choices=["hailo", "dxm1", "ultralytics", "sim"], default="sim")
+    ap.add_argument(
+        "--backend",
+        choices=["hailo", "dxm1", "ultralytics", "sim", "gt"],
+        default="sim",
+        help="gt: --replay 폴더의 gt.json 정답 상자를 검출 결과로 씀(scripts/make_sim4.py 합성 장면 확인용)",
+    )
     ap.add_argument(
         "--seg-npu",
         choices=["none", "dxm1"],
@@ -178,6 +192,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="off: Picamera2가 끝난 프레임을 들고 있지 않고 늘 다음 프레임을 기다림. 기본은 Picamera2 값(on)",
     )
     ap.add_argument("--cam-flush", action="store_true", help="read()마다 부른 뒤에 노출을 시작한 프레임만 받음")
+    # ---- 카메라 간 시간 맞춤(기본 꺼짐 = 예전처럼 카메라 순서대로 한 장씩 읽어 그대로 묶음) ----
+    ap.add_argument("--sync", action="store_true", help="카메라별 시각으로 기준 카메라에 가장 가까운 프레임끼리 묶음(FrameSyncer)")
+    ap.add_argument("--sync-ref", type=int, default=0, help="기준 카메라 번호(설정 순서). 기본 0")
+    ap.add_argument("--sync-tol-ms", type=float, default=25.0, help="묶음 허용 오차(ms). 기본 25")
+    ap.add_argument("--sync-miss", choices=["hold", "blank"], default="hold", help="허용 오차를 넘으면 hold: 이전 프레임 재사용, blank: 빈 칸")
+    ap.add_argument("--sync-csv", default=None, help="묶음마다 카메라별 시각 차이를 남길 csv 경로")
+    ap.add_argument("--skew-comp", action="store_true", help="묶음의 카메라별 시각 차이만큼 추적기에 넣는 위치를 트랙 속도로 옮김(--sync 필요)")
     return ap
 
 
@@ -386,6 +407,8 @@ def main() -> None:
     if args.shadow and args.seg_npu != "none":
         # DX-M1에 세그와 섀도 검출을 함께 올리면 방열 없는 지금 상태에서 너무 뜨거워지고 비교 조건도 달라진다
         ap.error("--shadow 와 --seg-npu 는 같이 쓸 수 없습니다")
+    if args.backend == "gt" and not args.replay:
+        ap.error("--backend gt 는 --replay 와 같이 써야 합니다(그 폴더의 gt.json을 읽음)")
     trig_lo, trig_hi = parse_score_range(ap, args.trigger_score)
 
     cams, grid, cfg = load_config(args.config)
@@ -410,6 +433,7 @@ def main() -> None:
 
         overrides = dict(v.split("=", 1) for v in args.video)
         cam_ov = camera_override(args)
+        hubs: dict = {}  # 쿼드 키트처럼 여러 카메라가 장치 하나를 나눠 쓸 때(설정 source.type: quad)
         try:
             if args.replay:
                 # 저장 영상 재생: 카메라를 열지 않는다. 주행 녹화(.mjpeg)와 이미지 폴더 모두 받는다
@@ -420,13 +444,21 @@ def main() -> None:
                 else:
                     # --cam-* 옵션은 CSI 카메라(picamera2)에만 덮어쓴다
                     is_pi = c.source.get("type") == "picamera2"
-                    sources.append(open_source(c, cam_ov if (cam_ov and is_pi) else None))
+                    sources.append(open_source(c, cam_ov if (cam_ov and is_pi) else None, hubs=hubs))
         except Exception:
             # 두 번째 카메라에서 실패해도 먼저 연 카메라는 놓아 준다
             for s in sources:
                 s.close()
             raise
-        if args.backend == "hailo":
+        if args.replay and any(hasattr(s, "next_ns") for s in sources) and not args.sync:
+            # 카메라마다 시각과 프레임 수가 다른 재생 파일(out/sim4)은 순서로 묶으면 어긋나므로 시각으로 묶는다
+            print("카메라별 시각이 있는 재생 파일이라 --sync 를 켭니다", flush=True)
+            args.sync = True
+        if args.backend == "gt":
+            from realityview.multicam import GtReplayBackend
+
+            backend = GtReplayBackend(os.path.join(args.replay, "gt.json"))
+        elif args.backend == "hailo":
             from realityview.detectors import HailoBackend
 
             backend = HailoBackend(
@@ -502,7 +534,25 @@ def main() -> None:
         view3d=make_view3d_config(args, cfg) if args.view != "bev" else None,
         ground_every=args.view3d_ground_every,
         tracker=args.tracker,
+        skew_comp=args.skew_comp,
     )
+    if args.skew_comp and not args.sync:
+        print("--skew-comp 는 --sync 와 같이 써야 동작합니다(지금은 꺼진 것과 같음)", flush=True)
+
+    # ---- 카메라 간 시간 맞춤(옵션) ----
+    synced = None
+    if args.sync and sources:
+        from realityview.multicam import FrameSyncer, SyncedSources
+
+        for s in sources:
+            # CSI 카메라는 이 값을 켜야 센서 시각을 꺼낸다(USB와 재생 소스는 늘 시각이 있다)
+            s.want_timestamp = True
+        synced = SyncedSources(
+            sources,
+            FrameSyncer([(c.width, c.height) for c in cams], [c.name for c in cams], ref=args.sync_ref,
+                        tolerance_ms=args.sync_tol_ms, on_miss=args.sync_miss, csv_path=args.sync_csv),
+        )
+    prev_ref_ns = None
 
     # ---- 메인 루프 ----
     writer = None
@@ -560,6 +610,12 @@ def main() -> None:
                     dt = 1.0 / args.fps
                     world.step(dt)
                     frames = world.render()
+                elif synced is not None:
+                    # 시간 맞춤: 기준 카메라 한 장 + 나머지는 그 시각에 가장 가까운 프레임
+                    frames = synced.read()
+                    read_done = [time.monotonic_ns()] * len(sources)
+                    if frames is None:
+                        frames = [None]
                 else:
                     frames, read_done = [], []
                     for s in sources:
@@ -567,11 +623,23 @@ def main() -> None:
                         read_done.append(time.monotonic_ns())  # 지연 측정용: 영상을 손에 넣은 시각
             if any(f is None for f in frames):
                 break
+            offsets = None
             if world is None:
                 now = time.perf_counter()
                 dt, last = now - last, now
+            if synced is not None:
+                b = synced.last
+                offsets = b.offsets_s
+                # 시간 맞춤 모드에서는 기준 카메라 시각 간격을 dt로 쓴다(재생이 실제보다 빨라도 속도가 맞게)
+                if prev_ref_ns is not None and b.ref_ns > prev_ref_ns:
+                    dt = (b.ref_ns - prev_ref_ns) / 1e9
+                prev_ref_ns = b.ref_ns
+            if hasattr(backend, "set_frame_meta"):
+                # gt 백엔드: 각 카메라 영상이 파일의 몇 번째 프레임인지 알려 준다
+                meta = synced.last.meta if synced is not None else [getattr(s, "recorded_frame", None) for s in sources]
+                backend.set_frame_meta(meta)
             # 2) 검출부터 렌더링까지
-            out = pipe.step(frames, dt)
+            out = pipe.step(frames, dt, offsets)
             done_ns = time.monotonic_ns()  # 대시보드 완성 시각(녹화, 화면 표시 전)
             # 지연 기록(--profile이고 센서 타임스탬프가 있을 때만)
             if latency is not None:
@@ -639,6 +707,11 @@ def main() -> None:
             # 모으던 클립까지 저장하고 쓰기 스레드를 끝낸다
             trig_stats = clipper.close()
             print(f"trigger_stats={json.dumps(trig_stats, ensure_ascii=False)}", flush=True)
+        sync_summary = None
+        if synced is not None:
+            synced.syncer.close()
+            sync_summary = synced.syncer.summary()
+            print(f"sync_summary={json.dumps(sync_summary, ensure_ascii=False)}", flush=True)
         if shadow is not None:
             print(f"shadow_summary={json.dumps(shadow.summary(), ensure_ascii=False)}", flush=True)
         if recorder is not None:
@@ -648,7 +721,8 @@ def main() -> None:
         # 측정 결과는 장치를 닫기 전에 먼저 쓴다(닫다가 멈춰도 결과는 남게)
         if args.profile:
             extra = {"det_frames": det_frames, "det_total": det_total, "record": rec_stats,
-                     "triggers": trig_stats, "shadow": shadow.summary() if shadow is not None else None}
+                     "triggers": trig_stats, "shadow": shadow.summary() if shadow is not None else None,
+                     "sync": sync_summary}
             if latency is not None:
                 extra["latency"] = latency.summary()
             rep = profile_report(args, timer, pipe, health_start, loop, extra)

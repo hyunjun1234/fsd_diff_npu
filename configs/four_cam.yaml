@@ -66,6 +66,8 @@ cameras:
       yaw: 135.0              # 뒤쪽으로 약 45도 돌린 왼쪽 뒤(04 문서, 출처 S4)
       pitch: 5.0              # 3D 도면의 추정값. 예전 값(옆을 향해 30도 숙임)보다 차 바로 옆 바닥이 덜 보인다. 실측 필요
       roll: 0.0
+    # 파이 5에서는 /dev/video0~15가 CSI 장치라 uri 0/1은 USB 카메라가 아니다.
+    # USB 카메라는 {type: usb, device: /dev/v4l/by-id/<장치 이름>} 으로 적는다(docs/phase1_demo.md 카메라 4대 구성)
     source: {type: opencv, uri: 0}
 
   - name: right

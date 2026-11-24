@@ -12,7 +12,16 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 
 from realityview.config import load_config  # noqa: E402
 from realityview.pipeline import RealityViewPipeline  # noqa: E402
-from realityview.sim import SimBackend, SimWorld  # noqa: E402
+from realityview.multicam import FrameSyncer, SyncedSources  # noqa: E402
+from realityview.sim import (  # noqa: E402
+    LANE_W,
+    SimBackend,
+    SimObject,
+    SimWorld,
+    camera_timelines,
+    default_objects,
+    per_camera,
+)
 
 # 시뮬레이션 정답 ID와 추적기 출력을 비교해 추적 품질을 숫자로 낸다.
 #
@@ -28,6 +37,9 @@ from realityview.sim import SimBackend, SimWorld  # noqa: E402
 # 예)
 #   /usr/bin/python3 scripts/eval_tracking.py --config configs/two_cam.yaml --fps 15 --frames 225
 #   /usr/bin/python3 scripts/eval_tracking.py --config configs/four_cam.yaml --tracker robust --seeds 0,1,2
+#   # 카메라별 시각 어긋남(좌우 카메라 +50ms)을 넣고 FrameSyncer로 묶어 평가, 위치 보정 켜기
+#   /usr/bin/python3 scripts/eval_tracking.py --config configs/four_cam.yaml --tracker robust \
+#       --cam-skew-ms 0,0,50,50 --sync-tol-ms 25 --skew-comp
 # 결과는 화면에 JSON으로 찍고, --out을 주면 그 파일에도 쓴다.
 
 
@@ -158,6 +170,97 @@ def run_sim(config: str, fps: float, frames: int, seed: int, tracker: str, warmu
     return m
 
 
+# ---------------------------------------------------------------------------
+# 카메라마다 찍은 시각이 다른 시뮬레이션 실행(FrameSyncer로 묶음)
+# ---------------------------------------------------------------------------
+class _ListStream:
+    """미리 만든 (시각 ns, 정답) 목록을 재생 소스처럼 읽는다. 영상은 늘 같은 검은 영상(평가에는 상자만 쓴다)."""
+
+    def __init__(self, entries: list, blank: np.ndarray):
+        self.entries = entries
+        self.blank = blank
+        self.pos = 0
+        self.recorded_timestamp_ns = None
+        self.recorded_frame = None
+
+    def next_ns(self):
+        return self.entries[self.pos][0] if self.pos < len(self.entries) else None
+
+    def read(self):
+        if self.pos >= len(self.entries):
+            return None
+        self.recorded_timestamp_ns = self.entries[self.pos][0]
+        self.recorded_frame = self.pos
+        self.pos += 1
+        return self.blank
+
+
+class _GtStub:
+    """SimBackend가 읽는 정답 자리(gt, gt_masks)만 가진 가짜 세계."""
+
+    def __init__(self, n: int):
+        self.gt = [[] for _ in range(n)]
+        self.gt_masks = [None] * n
+
+
+def run_sim_sync(config: str, fps: float, frames: int, seed: int, tracker: str, warmup: int, skew_ms: list[float],
+                 drop: list[float], jitter_ms: list[float], tol_ms: float, on_miss: str, skew_comp: bool,
+                 oncoming: bool = False):
+    """카메라 k를 n/fps + skew_ms[k] 시각에 찍고(흔들림, 누락 포함) FrameSyncer로 묶어 추적을 평가한다.
+
+    정답 위치는 기준 카메라(0번) 시각의 물체 위치다. 그래서 어긋난 카메라의 물체는 그만큼 다른 자리에서
+    측정되고, 보정(skew_comp)을 켜면 트랙 속도로 기준 시각 자리로 옮긴다.
+    돌려줌: (TrackingMetrics, FrameSyncer 요약)
+    """
+    cams, grid, cfg = load_config(config)
+    scale = float((cfg.get("scene") or {}).get("scale", 1.0))
+    n = len(cams)
+    objs = default_objects()
+    if oncoming:
+        # 시각 어긋남이 크게 드러나는 경우: 왼쪽 차로로 마주 오는 차(상대 속도 25 m/s = 90 km/h).
+        # 50ms 어긋나면 1.25m 다른 자리에서 측정된다
+        objs.append(SimObject("car", 40.0, LANE_W, -25.0, 0.0, 4.5, 1.9, 1.5, (90, 160, 90)))
+    world = SimWorld(cams, objects=objs)
+    # 1) 카메라별 촬영 시각과 그 시각의 정답 상자(바닥 무늬는 그리지 않아 빠르다)
+    tls = camera_timelines(n, frames, fps, skew_ms, drop, jitter_ms, seed=1000 + seed)
+    blanks = [np.zeros((c.height, c.width, 3), np.uint8) for c in cams]
+    streams = []
+    for k in range(n):
+        entries = []
+        for _, t in tls[k]:
+            world.set_time(t)
+            _, dets, ids, _ = world.render_camera(k, ground=False)
+            entries.append((int(round(t * 1e9)), dets, ids))
+        streams.append(_ListStream(entries, blanks[k]))
+    # 2) 묶어서 파이프라인에 넣는다
+    syncer = FrameSyncer([(c.width, c.height) for c in cams], [c.name for c in cams], tolerance_ms=tol_ms, on_miss=on_miss)
+    reader = SyncedSources(streams, syncer)
+    stub = _GtStub(n)
+    pipe = RealityViewPipeline(cams, SimBackend(stub, seed=seed), grid, show_ground=False, show_cameras=False,
+                               scale=scale, tracker=tracker, skew_comp=skew_comp)
+    m = TrackingMetrics(scale)
+    prev_ns, fi = None, 0
+    try:
+        while reader.read() is not None:
+            b = reader.last
+            used = [streams[k].entries[b.meta[k]] if b.meta[k] is not None else None for k in range(n)]
+            stub.gt = [u[1] if u else [] for u in used]
+            dt = (b.ref_ns - prev_ns) / 1e9 if prev_ns is not None else 1.0 / fps
+            prev_ns = b.ref_ns
+            out = pipe.step(b.frames, dt, b.offsets_s)
+            # 정답: 쓴 영상 중 어디든 보인 물체의 기준 시각 위치
+            world.set_time(b.ref_ns / 1e9)
+            seen = sorted({i for u in used if u for i in u[2]})
+            gts = [((i, world.wraps[i]), world.objects[i].label, np.array([world.objects[i].x, world.objects[i].y]))
+                   for i in seen]
+            if fi >= warmup:
+                m.add(fi, gts, out.tracks)
+            fi += 1
+    finally:
+        pipe.close()
+    return m, syncer.summary()
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="configs/two_cam.yaml")
@@ -168,13 +271,32 @@ def main() -> None:
     ap.add_argument("--warmup", type=int, default=0, help="앞 N 프레임은 지표에서 뺌")
     ap.add_argument("--events", action="store_true", help="ID 바뀜 사건(프레임, 정답, 옛 ID, 새 ID)도 찍음")
     ap.add_argument("--out", help="결과 JSON 경로. 예: out/measure/11_track_two_cam_basic.json")
+    # ---- 카메라별 시각 어긋남 평가(하나라도 주면 FrameSyncer로 묶어 평가. 기본은 예전 방식) ----
+    ap.add_argument("--cam-skew-ms", default=None, help="카메라별 시각 어긋남(ms, 쉼표 구분). 예: 0,0,50,50")
+    ap.add_argument("--cam-drop", default=None, help="카메라별 프레임 누락 확률. 예: 0,0,0,0.05")
+    ap.add_argument("--cam-jitter-ms", default=None, help="카메라별 시각 흔들림 표준편차(ms). 예: 0,0,1,1")
+    ap.add_argument("--sync-tol-ms", type=float, default=25.0, help="묶음 허용 오차(ms). 기본 25")
+    ap.add_argument("--sync-miss", choices=["hold", "blank"], default="hold", help="허용 오차를 넘으면 이전 프레임(hold) 또는 빈 칸(blank)")
+    ap.add_argument("--skew-comp", action="store_true", help="묶음의 시각 차이만큼 물체 위치를 트랙 속도로 옮김")
+    ap.add_argument("--oncoming", action="store_true", help="시각 어긋남 평가에 마주 오는 차(상대 25 m/s) 한 대를 더함")
     args = ap.parse_args()
+    sync_mode = any(v is not None for v in (args.cam_skew_ms, args.cam_drop, args.cam_jitter_ms)) or args.skew_comp \
+        or args.oncoming
+    sync_summ = {}
 
     per_seed = {}
     total = {"id_switches": 0, "gt_frames": 0, "missed": 0, "dup_frames": 0, "false_tracks": 0, "max_tracks": 0}
     tpo = []
     for s in [int(x) for x in args.seeds.split(",") if x.strip()]:
-        m = run_sim(args.config, args.fps, args.frames, s, args.tracker, args.warmup)
+        if sync_mode:
+            n = len(load_config(args.config)[0])
+            m, sync_summ[s] = run_sim_sync(
+                args.config, args.fps, args.frames, s, args.tracker, args.warmup,
+                per_camera(args.cam_skew_ms, n), per_camera(args.cam_drop, n), per_camera(args.cam_jitter_ms, n),
+                args.sync_tol_ms, args.sync_miss, args.skew_comp, args.oncoming,
+            )
+        else:
+            m = run_sim(args.config, args.fps, args.frames, s, args.tracker, args.warmup)
         summ = m.summary()
         if args.events:
             summ["events"] = m.events
@@ -196,6 +318,11 @@ def main() -> None:
         "total": total,
         "per_seed": per_seed,
     }
+    if sync_mode:
+        rep["sync"] = {"cam_skew_ms": args.cam_skew_ms, "cam_drop": args.cam_drop, "cam_jitter_ms": args.cam_jitter_ms,
+                       "tol_ms": args.sync_tol_ms, "miss": args.sync_miss, "skew_comp": args.skew_comp,
+                       "oncoming": args.oncoming,
+                       "per_seed": sync_summ}
     text = json.dumps(rep, ensure_ascii=False, indent=2, default=str)
     print(text)
     if args.out:

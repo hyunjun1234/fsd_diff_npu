@@ -22,6 +22,7 @@
 - `realityview/render.py`: 위에서 본 그림 렌더링과 대시보드
 - `realityview/render3d.py`: 자차 뒤쪽 위에서 본 3D 시점 렌더링(`--view 3d`)
 - `realityview/sim.py`: 하드웨어 없이 확인하는 합성 장면과 가짜 검출기
+- `realityview/multicam.py`: USB 카메라, 쿼드 키트 칸 나누기, 카메라 간 시간 맞춤(`FrameSyncer`)
 - `scripts/run_demo.py`: 실행 스크립트
 - `scripts/calib_intrinsics.py`, `scripts/calib_extrinsics.py`: 카메라 보정
 - `configs/two_cam.yaml`, `configs/four_cam.yaml`: 카메라 배치 예시
@@ -62,6 +63,33 @@ python scripts/run_demo.py --backend sim --view 3d --view3d-interp --fps 15 --fr
 화면이 느리면 `--view3d-ground-every 3 --view3d-scale 0.5`를 먼저 씁니다. 바닥을 다시 만드는 일이 3D 그리기 시간의 대부분이라 갱신 주기를 늘리는 쪽이 효과가 큽니다. 모형 설정(`scene.scale`)에서는 가상 카메라 위치와 물체 크기에 같은 축척을 곱하므로 실차 설정과 같은 화면이 나옵니다. 설정 파일에 `view3d:` 항목을 두면 `View3DConfig`의 기본값을 바꿀 수 있고, 명령줄 옵션이 그 위에 덮어씁니다.
 
 3D 그리기만 따로 재려면 `python3 scripts/bench_render3d.py --out out/measure/bench_render3d.json`을 실행합니다. 카메라와 NPU 없이 가짜 트랙 0, 10, 20개로 재고, 결과는 `--out` 경로에 생깁니다.
+
+## 카메라 4대 구성
+
+카메라마다 설정의 `source.type`으로 입력을 고릅니다. 코드는 `realityview/multicam.py`에 있습니다.
+
+CSI 카메라는 지금처럼 `{type: picamera2, index: 0}`을 씁니다. 파이 5의 CSI 포트는 2개라 3번째, 4번째 카메라는 USB나 쿼드 키트로 채웁니다.
+
+USB 카메라는 `{type: usb, device: /dev/v4l/by-id/<장치 이름>, fps: 30, fourcc: MJPG}`처럼 적습니다. 파이의 `/dev/video0`~`/dev/video15`는 CSI 장치라서 번호 대신 `ls /dev/v4l/by-id/`로 찾은 경로를 씁니다. 프레임마다 받은 시각(`time.monotonic_ns()`, CSI 센서 시각과 같은 시계)이 붙고, 전송 지연만큼 `timestamp_offset_ms`로 뺄 수 있습니다. 카메라 없이 시험할 때는 `{type: video, uri: out/sim4/cam2.mp4, fps: 30}`으로 동영상 파일을 가짜 USB 카메라로 씁니다. CSI 2대와 가짜 측면 2대를 섞은 예가 `configs/four_cam_mixed.yaml`입니다.
+
+쿼드 키트는 네 카메라가 같은 `group`을 쓰고 칸 번호(`tile`, 왼쪽 위부터 0~3)와 지연 프레임 수(`lag_frames`)를 적습니다. 합쳐진 영상을 읽는 장치는 같은 group의 첫 카메라에 `inner`로 한 번만 적습니다.
+
+```yaml
+source: {type: quad, group: kit0, tile: 2, lag_frames: 1,
+         inner: {type: picamera2, index: 0, fps: 30, width: 2304, height: 1296}}
+```
+
+`align: true`(기본)면 늦지 않은 칸을 지연만큼 묵혀 네 칸이 같은 순간을 보이게 하고, `false`면 시각만 앞당겨 적습니다. 칸 순서와 2번, 3번이 한 프레임 늦는 방향은 실제 키트로 확인 필요입니다.
+
+카메라마다 시각이 다르면 `--sync`를 줍니다. 기준 카메라(`--sync-ref`, 기본 0) 시각에 가장 가까운 프레임끼리 묶고, 허용 오차(`--sync-tol-ms`, 기본 25)를 넘으면 `--sync-miss hold`(가장 가까운 프레임 재사용, 기본) 또는 `blank`(빈 칸)로 채웁니다. `--sync-csv`를 주면 묶음마다 카메라별 시각 차이가 그 csv에 남고, `--skew-comp`는 그 차이만큼 물체 위치를 트랙 속도로 옮겨 추적기에 넣습니다.
+
+```bash
+python scripts/make_sim4.py --out out/sim4
+python scripts/run_demo.py --config configs/four_cam.yaml --backend gt --replay out/sim4 --headless \
+    --view both --tracker robust --frames 200 --save out/video/sim4_replay.mp4
+```
+
+첫 명령은 카메라별 시각 어긋남과 프레임 누락을 넣은 합성 4대 영상(`out/sim4/cam0~3.mp4`, 시각 csv, 정답 `gt.json`)을 만들고, 둘째 명령은 그 영상을 시각으로 묶어 재생한 결과를 `out/video/sim4_replay.mp4`에 저장합니다. 시각 어긋남별 추적 지표는 `scripts/eval_tracking.py --config configs/four_cam.yaml --tracker robust --cam-skew-ms 0,0,50,50`로 냅니다.
 
 ## 라즈베리파이 5와 Hailo-8에 설치하기
 
