@@ -8,6 +8,7 @@
 - [엣지 NPU 사양 비교](docs/02_edge_npu_spec_comparison.md): Hailo-8, 8L, 10H와 DEEPX DX-M1의 사양, 테슬라 AI4의 리얼리티 뷰 연산량과의 비교
 - [테슬라 카메라 배치와 시야](docs/04_tesla_camera_layout.md): 카메라별 장착 위치, 방향, 화각, 최대 거리와 3D 도면([viz/tesla_camera_layout_3d.html](viz/tesla_camera_layout_3d.html))
 - [테슬라 카메라 자리별 파이 5 카메라 선정](docs/06_pi5_camera_selection.md): 자리별 추천 제품, 화각과 HDR, 저조도 비교, 3대 이상 연결 방법, 국내 가격
+- [차량 장착과 학습 순환 계획](docs/07_vehicle_mount_and_training_plan.md): 타공 없는 카메라 부착, 배선과 전원과 발열, 국내 법규, 테슬라의 학습 방식, 자동 라벨링, 추가 학습과 NPU 재배포 순환
 - [엣지 NPU 구성과 모델 선정](docs/edge_npu_model_selection.md): 연산자 지원, BEV 모델 방식 비교, 단계별 계획
 - [리얼리티 뷰 1단계 데모](docs/phase1_demo.md): 데모 코드의 구조, 설치와 실행, 카메라 보정
 - [라즈베리파이 5, Hailo-8, DX-M1 구현 계획](docs/03_pi5_hailo8_dxm1_implementation_plan.md): 두 NPU 연결 방법, 카메라 수와 배치, NPU별 모델 배치, 단계별 구현 순서와 완료 기준
