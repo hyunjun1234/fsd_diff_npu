@@ -10,3 +10,4 @@
 | [엣지 NPU 사양 비교](docs/02_edge_npu_spec_comparison.md) | Hailo-8, 8L, 10H와 DEEPX DX-M1의 사양, 테슬라 AI4의 리얼리티 뷰 연산량과의 비교 |
 | [엣지 NPU 구성과 모델 선정](docs/edge_npu_model_selection.md) | 연산자 지원, BEV 모델 방식 비교, 단계별 계획 |
 | [리얼리티 뷰 1단계 데모](docs/phase1_demo.md) | 데모 코드의 구조, 설치와 실행, 카메라 보정 |
+| [라즈베리파이 5, Hailo-8, DX-M1 구현 계획](docs/03_pi5_hailo8_dxm1_implementation_plan.md) | 두 NPU 연결 방법, 카메라 수와 배치, NPU별 모델 배치, 단계별 구현 순서와 완료 기준 |
