@@ -66,7 +66,29 @@ Arducam 멀티 카메라 어댑터(V2.2)는 여러 대를 붙여도 한 번에 �
 
 나머지 방법은 CSI 2대에 USB 카메라를 더하는 구성입니다. USB 쪽은 하드웨어 동기화가 없으므로 타임스탬프로 프레임을 묶어야 합니다(03 문서 2.3절).
 
-정리하면 4대까지는 CSI 0번에 쿼드 키트(좌우와 후방 등 같은 화각 자리), CSI 1번에 전방 카메라 한 대를 두는 구성이 가장 현실적입니다. 다만 쿼드 키트를 쓰면 한 포트에 같은 센서가 고정되므로 후방에 IMX462를 두려면 쿼드 키트 대신 CSI 2대와 USB 조합을 써야 합니다.
+모형 시험에서는 CSI 0번에 쿼드 키트(좌우와 후방 등 같은 화각 자리), CSI 1번에 전방 카메라 한 대를 두는 구성이 가장 간단합니다. 실제 차량에서는 배선 길이 때문에 구성이 달라지며, 다음 장에 정리했습니다.
+
+## 차량에 달 때의 배선
+
+파이를 운전석과 조수석 사이 콘솔에 둔다고 하면, 04 문서의 좌표와 내장재 안쪽으로 돌아가는 길이를 더해 배선 길이는 앞유리 약 2m, B필러 약 2m, 뒷유리 약 3m, 앞펜더 약 3~4m로 봅니다. 모두 추정이며 실제 차에서 재야 합니다. 파이 5에 기본으로 쓰는 CSI 리본 케이블은 판매 제품이 300mm 수준이라 [K6] 이 거리를 그대로 감당하지 못합니다.
+
+| 방식 | 최대 거리 | 파이 5 |
+|---|---|---|
+| CSI-HDMI 확장 | 10m | 지원 |
+| GMSL2 확장 키트 | 15m | 지원 |
+| USB 카메라 | 케이블 규격에 따름 | 지원 |
+
+CSI-HDMI 확장 모듈(Arducam B0091)은 CSI 신호를 HDMI 케이블로 옮겨 10m까지 늘립니다 [C9][C10]. Camera Module 3에서 동작한다고 적혀 있고 [C10], 고품질 HDMI 케이블을 쓰라는 조건이 붙어 있습니다 [C9]. 파이 5에는 22핀 변환 케이블이 따로 필요합니다 [C10]. 값이 싸고 지금 쓰는 CSI 카메라를 그대로 쓸 수 있지만, HDMI 커넥터는 차량 진동에 맞게 만든 것이 아니라 커넥터 고정이 필요합니다. Arducam IMX462 141도 모델과의 조합은 확인 필요입니다.
+
+GMSL2 확장 키트는 차량용 동축 케이블(FAKRA)로 최대 15m까지 보내며 파이 5 호환으로 표기돼 있습니다 [C11]. 차량용으로 만든 방식이라 가장 튼튼하지만, Arducam 키트에 들어가는 카메라는 IMX219와 IMX477뿐이라 HDR이나 저조도 센서를 고를 수 없습니다 [C11][C12]. Camera Module 3를 GMSL2로 잇는 다른 회사 제품(V-Link)도 있지만 크라우드펀딩 제품이고 별도 드라이버가 필요해 [C13] 지금은 후보에서 뺐습니다.
+
+USB 카메라는 파이 5의 CSI 포트 2개를 넘는 3번째, 4번째 카메라에 씁니다. USB 2.0은 수동 케이블로 5m 안팎까지 쓸 수 있고 USB 3.0은 그보다 짧다고 알려져 있으나 확인 필요입니다. 저조도 후보로 Arducam IMX462 USB 3.0 모듈(수평 85도, F1.0, 1080p 60fps)이 있습니다 [C14]. 다만 USB 2.0 포트에 꽂으면 720p 10fps로 떨어집니다 [C14]. 차 밖에 달 경우에는 방수 하우징과 적외선 LED가 달린 Arducam STARVIS 2 USB 카메라(IP65, 수평 86도, USB 2.0)가 맞습니다 [C15]. USB 카메라는 하드웨어 동기화가 없어서 타임스탬프로 프레임을 묶어야 합니다.
+
+쿼드 키트는 카메라 4대가 HAT 하나에 짧은 리본으로 연결되는 구조라, 차 앞뒤와 양옆에 카메라를 흩어 놓는 데는 맞지 않습니다. 카메라마다 CSI-HDMI 확장을 붙이는 방법은 확인 필요라서 쿼드 키트는 모형 시험용으로만 권합니다.
+
+차 밖(펜더, 범퍼, 번호판 위)에 다는 카메라는 방수가 필요합니다. 처음 차량 시험에서는 앞유리, 뒷유리, 양쪽 옆유리 안쪽에 붙이면 방수 문제 없이 시작할 수 있고, 위치가 테슬라와 조금 달라지는 만큼 설정 파일의 카메라 좌표를 실제 값으로 바꾸면 됩니다.
+
+정리하면 차량용 구성은 CSI 2대를 CSI-HDMI 확장으로 늘려 전방(Camera Module 3 Wide)과 후방(IMX462 141도)에 두고, 좌우는 USB 카메라 2대로 채우는 방식입니다. 좌우 카메라는 밤 주행이 중요하면 IMX462 USB 3.0 모듈, 차 밖에 달아야 하면 STARVIS 2 IP65 모델을 고릅니다.
 
 ## 국내 가격
 
@@ -79,6 +101,10 @@ Arducam 멀티 카메라 어댑터(V2.2)는 여러 대를 붙여도 한 번에 �
 | Arducam IMX462 92도 | 93,500원 | 가치창조기술 [K5] |
 | Arducam IMX462 141도 | 확인 필요 | 해외 39.99달러 [C2] |
 | Arducam IMX708 쿼드 키트 | 확인 필요 | 해외 199.99달러 [C5] |
+| CSI-HDMI 확장 모듈 1세트 | 22,000원 | 디바이스마트 [K7] |
+| 파이 5용 카메라 케이블 300mm | 2,970원 | 디바이스마트 [K6] |
+| STARVIS 2 USB IP65 카메라 | 확인 필요 | 해외 59.99달러 [C15] |
+| IMX462 USB 3.0 모듈 | 확인 필요 | 가격 표기 없음 [C14] |
 
 국내 가격은 모두 부가세 포함입니다. 디바이스마트 상품 페이지에는 품절 문구가 함께 보여 재고는 주문 전에 확인 필요입니다. 가치창조기술의 IMX462는 화각 92도의 다른 모델(Pivariety 방식)이라 141도 모델과 같은 제품이 아닙니다 [K5]. 141도 모델과 쿼드 키트는 국내 판매처를 찾지 못해 Arducam 공식몰 가격만 적었고, 해외 배송비와 관세는 확인 필요입니다.
 
@@ -92,8 +118,17 @@ Arducam 멀티 카메라 어댑터(V2.2)는 여러 대를 붙여도 한 번에 �
 - C6: [Camarray Hat wont connect to Raspberry Pi 5, Arducam 포럼](https://forum.arducam.com/t/camarray-hat-wont-connect-to-raspberry-pi-5/8281)
 - C7: [Multi Camera Adapter Module V2.2, The Pi Hut](https://thepihut.com/products/multi-camera-adapter-module-v2-2-for-raspberry-pi)
 - C8: [Raspberry Pi 카메라 문서](https://www.raspberrypi.com/documentation/accessories/camera.html)
+- C9: [Arducam CSI-to-HDMI Adapter Set](https://www.arducam.com/product/camera-csi-to-hdmi-adapter-set-2/)
+- C10: [Raspberry Pi Camera HDMI Cable Extension, The Pi Hut](https://thepihut.com/products/raspberry-pi-camera-hdmi-cable-extension)
+- C11: [GMSL2 8MP Camera Extension Kit for Raspberry Pi, The Pi Hut](https://thepihut.com/products/gmsl2-8mp-camera-extension-kit-for-raspberry-pi)
+- C12: [Arducam GMSL Camera for Raspberry Pi 소개](https://docs.arducam.com/GMSL-Camera-Solution/GMSL-Camera-for-Raspberry-Pi/Introduction/)
+- C13: [V-Link leverages GMSL2 to extend Raspberry Pi camera, CNX Software](https://www.cnx-software.com/2025/01/29/v-link-gmsl2-extend-raspberry-pi-camera-with-up-to-15-meter-cable/)
+- C14: [Arducam 2MP IMX462 USB 3.0 Camera Module](https://www.arducam.com/product/arducam-2mp-imx462-manual-focus-usb-3-0-camera-module/)
+- C15: [Arducam True Day and Night Vision USB2 UVC Camera, IP65](https://www.arducam.com/arducam-true-day-night-vision-usb2-uvc-camera-with-ip65-waterproof-housing.html)
 - K1: [디바이스마트, 카메라모듈 3 와이드](https://www.devicemart.co.kr/goods/view?no=14933041)
 - K2: [디바이스마트, 카메라모듈 3 NoIR 와이드](https://www.devicemart.co.kr/goods/view?no=14944173)
 - K3: [디바이스마트, 카메라모듈 3](https://www.devicemart.co.kr/goods/view?no=14917048)
 - K4: [가치창조기술, 라즈베리 글로벌셔터 카메라 C/CS 마운트](https://vctec.co.kr/product/x/21663/)
 - K5: [가치창조기술, 아두캠 저조도 카메라 모듈 IMX462](https://vctec.co.kr/product/x/19478/)
+- K6: [디바이스마트, 라즈베리파이5 FPC 카메라 케이블 300mm](https://www.devicemart.co.kr/goods/view?no=15285261)
+- K7: [디바이스마트, Arducam CSI-HDMI 케이블 확장 모듈 B0091](https://www.devicemart.co.kr/goods/view?no=12231955)
