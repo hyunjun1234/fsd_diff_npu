@@ -37,6 +37,8 @@
 
 빠른 물체 추적도 고쳤습니다. 마주 오는 차(상대 25 m/s)에서 ID가 바뀌던 원인은 겹친 트랙 정리가 빠른 트랙을 지운 것, 카메라 사이 공백보다 짧은 트랙 유지 한도, 느린 속도 수렴, 먼 거리의 좁은 짝짓기 거리였고, `--tracker robust`에서 모두 고쳤습니다(물체 20개에 6.6ms). 카메라가 응답하지 않으면 다시 여는 `--cam-retry`도 넣었습니다. robust를 기본값으로 바꾸는 것은 주행 녹화로 한 번 비교한 뒤 합니다.
 
+빠른 재보정 도구를 만들었습니다. `scripts/recalib_markers.py`는 바닥 마커 4개 이상으로 카메라 각도만 다시 구하고(확인 후 `--write`), `--calib-monitor`는 주행 중 차선 소실점으로 pitch와 yaw가 1도 넘게 벗어나면 경고하며(시뮬레이션에서 1~2도 틀어짐을 찾음), `scripts/check_overlap.py`는 두 카메라가 함께 보는 바닥이 맞물리는지 봅니다. 절차는 [모형 보정 문서](phase1_model_rig_calibration.md) 9장에 있습니다.
+
 ## 장비 구성
 
 라즈베리파이 5(Debian 13, 64비트)에 Seeed 듀얼 M.2 HAT로 Hailo-8과 DX-M1 4GB를 함께 달았고, 두 NPU 모두 PCIe Gen3 x1로 인식됩니다. 런타임은 HailoRT 4.23.0, DXRT 3.4.2이고, `dx_engine`은 파이 저장소의 `.venv`에만 있습니다.
@@ -131,5 +133,6 @@ cd ~/Desktop/App/fsd_diff_npu && python ~/Desktop/App/fsd_agent.py --task-file d
 | 15 차선과 신호등 | 8.76달러 |
 | 16 자동 시작과 과열 대응 | 4.29달러 |
 | 17 빠른 물체 추적 | 6.03달러 |
+| 18 빠른 재보정 | 7.48달러 |
 
-합계는 114.41달러에 끊긴 실행 한 번이 더해집니다. 실제 금액은 Console의 Cost 페이지가 기준입니다.
+합계는 121.89달러에 끊긴 실행 한 번이 더해집니다. 실제 금액은 Console의 Cost 페이지가 기준입니다.

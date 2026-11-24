@@ -168,3 +168,81 @@ timeout -s INT -k 5 60 python3 scripts/locate_objects.py --config configs/two_ca
 ## 8. 결과 정리
 
 보정 사진, 결과 yaml, 오차 기록은 out/calib/ 에 둡니다(저장소에 올라가지 않음). 고친 configs/two_cam_model.yaml은 저장소에 올리고, 측정한 오차 값은 out/measure/ 에 문서로 남깁니다.
+
+## 9. 빠른 재보정
+
+차에서는 진동이나 카메라 탈착으로 각도가 조금씩 바뀝니다. 내부 보정과 5장의 외부 보정을 한 번 마친 뒤에는 체커보드를 다시 깔지 않고 바닥 마커 몇 개로 각도만 다시 맞춥니다. 주행 중에는 차선으로 틀어짐을 점검하고, 카메라가 4대이면 겹친 바닥이 맞물리는지 확인합니다. 세 도구 모두 설정 파일을 스스로 바꾸지 않고, 바닥 마커 도구만 `--write`를 줄 때 씁니다.
+
+### 9.1 마커 인쇄
+
+OpenCV ArUco 마커(사전 DICT_4X4_50, 번호 0~5)를 씁니다. 아래 명령은 600dpi 기준 인쇄용 그림을 만듭니다(결과: out/calib/markers/aruco_0_50mm.png 같은 파일 6장). 그림 둘레의 흰 여백(한 변의 1/4)도 검출에 필요하므로 자르지 않습니다.
+
+```bash
+mkdir -p out/calib/markers && python3 -c "
+import sys; sys.path.insert(0, '.')
+import cv2
+from realityview.calib import marker_image
+side_mm = 50  # 마커 검은 테두리 한 변(mm). 모형(축척 0.1)은 50, 실차는 500
+px = round(side_mm / 25.4 * 600)
+for i in range(6):
+    cv2.imwrite(f'out/calib/markers/aruco_{i}_{side_mm}mm.png', marker_image(i, px))
+"
+```
+
+"실제 크기" 또는 100%로 인쇄하고, 인쇄된 검은 테두리 한 변을 쇠자로 재서 적어 둡니다. 실차용 500mm 마커는 A4에 들어가지 않으므로 출력소에서 A2로 뽑거나 판에 붙여 평평하게 씁니다. 합성 장면 시험은 한 변 0.5m(모형이면 5cm)로만 했고, 더 작은 마커가 잡히는지는 확인 필요입니다.
+
+ArUco가 없는 OpenCV 판이면 같은 명령에서 `marker_image(i, px, 'circle')`로 검은 원을 뽑습니다. 원은 번호가 없어 지금 외부 값으로 예상한 자리에 가장 가까운 원을 그 번호로 보고, 원근 때문에 중심이 조금 치우쳐서 ArUco보다 덜 정확합니다(합성 장면에서 각도 오차 최대 약 0.4도, ArUco는 0.1도 안팎).
+
+### 9.2 마커 놓기와 위치 재기
+
+마커 4개 이상(6개 권장)을 카메라가 잘 보는 가까운 바닥에 일직선이 되지 않게 흩어 놓습니다. 실차 기준 자리는 아래와 같고, 모형은 각 값에 축척을 곱합니다.
+
+| 카메라 | 마커 중심 X 범위 (원점 기준) | Y 범위 |
+|---|---|---|
+| 전방 | 3.8 ~ 6.0m | -1.6 ~ 1.6m |
+| 후방 | -3.0 ~ -4.8m | -1.2 ~ 1.2m |
+
+마커는 어느 방향으로 돌려 놓아도 되고, 중심 위치만 원점에서 줄자로 잽니다. 잰 값을 CSV로 적습니다(헤더 id,X,Y, 단위는 설정과 같은 m). 아래는 축척 0.1 모형의 전방 예이고 out/calib/markers_front.csv로 저장합니다.
+
+```text
+id,X,Y
+0,0.38,0.12
+1,0.38,-0.12
+2,0.50,0.16
+3,0.50,-0.16
+4,0.44,0.00
+5,0.60,0.03
+```
+
+### 9.3 촬영과 계산
+
+```bash
+timeout -s INT -k 5 60 python3 scripts/record_frames.py --config configs/two_cam_model.yaml --camera front --frames 1 --out out/calib/front_markers
+python3 scripts/recalib_markers.py --config configs/two_cam_model.yaml --camera front --image out/calib/front_markers/front_00000.png --layout out/calib/markers_front.csv
+```
+
+화면에 찾은 마커 번호, 이전 값과의 각도 차이(yaw, pitch, roll), 위치 차이, 이전 값과 새 값의 지면 역투영 오차가 나옵니다. 확인 그림은 out/calib/front_markers/front_00000_markers.png에 생기고, 빨간 십자는 이전 값, 파란 십자는 새 값으로 예상한 마커 자리입니다. 파란 십자가 마커 가운데에 있고 새 값의 지면 역투영 오차가 기준 안이면 같은 명령에 `--write`를 붙여 다시 실행합니다. 설정 파일에서 그 카메라의 yaw, pitch, roll 줄 숫자만 바뀌고 주석은 남습니다. 원래 파일 사본은 out/calib/backup/ 에 생깁니다.
+
+- 기본은 위치를 그대로 두고 각도만 풉니다. 카메라를 다른 자리에 다시 붙였으면 `--solve-position`을 더해 위치까지 풉니다(마커 6개 이상).
+- 새 값의 지면 역투영 오차 평균이 실차 5cm(`--max-ground-err 0.05`)에 축척을 곱한 값보다 크면 `--write`를 거절합니다. 축척 0.1 모형이면 5mm입니다.
+- 각도가 10도 넘게 바뀌면 `--write`를 거절합니다. 이때는 CSV의 번호와 위치를 먼저 확인합니다.
+
+### 9.4 주행 중 보정 점검
+
+```bash
+timeout -s INT -k 5 70 python3 scripts/run_demo.py --config configs/two_cam_current.yaml --backend hailo --headless --duration 60 --calib-monitor --health-csv out/measure/calib_health.csv --health-interval 10 --hailo-stop-temp 95
+```
+
+카메라마다 자기가 맡은 바닥에서 차선을 찾고, 곧은 차선 둘 이상이 만나는 소실점으로 설정 값 대비 yaw, pitch 차이를 잽니다. 최근 60초(`--calib-window`) 평균이 1도(`--calib-warn-deg`)를 넘으면 화면 왼쪽 아래에 "CALIB CHECK" 글이, 로그에 "보정 점검" 경고가 남고, 끝날 때 `calib_monitor=` 줄에 카메라별 평균이 찍힙니다. 경고가 뜨면 9.3절의 마커 재보정을 합니다.
+
+이 점검은 차가 차선과 나란히 달린다고 보고 yaw를 재므로, 차선 변경이나 차선 안 흔들림이 섞이는 한 프레임 값은 믿지 않고 오래 평균한 값만 봅니다. 오르막과 내리막에서는 길의 기울기가 pitch 차이에 섞이고, roll은 이 방법으로 알 수 없습니다. 곧은 길에서 차선이 양쪽 다 보일 때만 표본이 쌓이므로, 차선이 없는 길에서는 경고가 나오지 않습니다.
+
+### 9.5 카메라 간 겹침 확인
+
+카메라가 4대이면 이웃 카메라가 함께 보는 바닥이 있습니다. 빈 도로나 주차장에서 같은 순간에 찍은 영상으로 겹친 바닥이 탑뷰에서 맞물리는지 봅니다(결과: 화면과 out/measure/overlap.json).
+
+```bash
+python3 scripts/check_overlap.py --config configs/four_cam.yaml --image rear=out/calib/ov/rear_00000.png --image left=out/calib/ov/left_00000.png --image right=out/calib/ov/right_00000.png --json out/measure/overlap.json
+```
+
+쌍마다 특징점 어긋남, 차선 횡위치 차이, 밝기 상관과 판정이 나옵니다. 어긋남이 기준(실차 0.15m, 모형은 축척을 곱함)을 넘는 쌍이 있으면 두 카메라 중 마커 재보정 결과가 더 크게 바뀌는 쪽이 틀어진 카메라입니다. 지금 2대 설정(two_cam_current.yaml, two_cam_model.yaml)은 전방과 후방 사이가 사각지대라 겹친 바닥이 없다고 나옵니다.

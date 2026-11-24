@@ -14,6 +14,7 @@ import cv2
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from realityview.config import load_config  # noqa: E402
+from realityview.calib_monitor import draw_warnings  # noqa: E402
 from realityview.lanes import LaneConfig  # noqa: E402
 from realityview.pipeline import RealityViewPipeline  # noqa: E402
 from realityview.traffic_lights import TrafficLightConfig  # noqa: E402
@@ -220,10 +221,17 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--sync-csv", default=None, help="묶음마다 카메라별 시각 차이를 남길 csv 경로")
     ap.add_argument("--lanes", action="store_true", help="탑뷰 바닥 영상에서 차선을 찾아 3D 화면과 탑뷰에 그림(기본 꺼짐)")
     ap.add_argument("--lanes-every", type=int, default=1, help="차선 검출을 N 프레임마다(그 사이는 지난 결과). 기본 1")
+    ap.add_argument("--calib-monitor", action="store_true",
+                    help="주행 중 보정 점검: 차선 소실점으로 카메라 yaw, pitch 차이를 재서 기준을 넘으면 화면과 로그에 경고(기본 꺼짐)")
+    ap.add_argument("--calib-every", type=int, default=10, help="--calib-monitor 점검 간격(프레임). 기본 10")
+    ap.add_argument("--calib-window", type=float, default=60.0, help="--calib-monitor 평균 시간(초). 기본 60")
+    ap.add_argument("--calib-warn-deg", type=float, default=1.0, help="--calib-monitor 경고 기준(도). 기본 1.0")
     ap.add_argument(
         "--traffic-lights", action="store_true",
         help="검출기에 COCO traffic light(9)를 더하고 상자 색(빨강, 노랑, 초록)을 판별해 화면에 그림(기본 꺼짐)",
     )
+    ap.add_argument("--sim-angle-error", action="append", default=[], metavar="CAM:YAW:PITCH",
+                    help="sim 영상을 그릴 때만 카메라 각도를 틀어 그린다(도, 여러 번 줄 수 있음). 예: front:1.5:2.0")
     ap.add_argument("--sim-curvature", type=float, default=0.0, help="sim 도로 곡률(1/m). 예: 0.006. 기본 0(곧은 도로)")
     ap.add_argument("--sim-lights", action="store_true", help="sim 장면 앞쪽에 세로형, 가로형 신호등을 띄움")
     ap.add_argument("--skew-comp", action="store_true", help="묶음의 카메라별 시각 차이만큼 추적기에 넣는 위치를 트랙 속도로 옮김(--sync 필요)")
@@ -250,6 +258,30 @@ def camera_override(args) -> dict:
 # ---------------------------------------------------------------------------
 # 3D 시점 설정 만들기
 # ---------------------------------------------------------------------------
+def make_calib_monitor_config(args):
+    """--calib-monitor 옵션을 CalibMonitorConfig로. 꺼져 있으면 None(파이프라인이 예전과 같게 돈다)."""
+    if not args.calib_monitor:
+        return None
+    from realityview.calib_monitor import CalibMonitorConfig
+
+    return CalibMonitorConfig(every=args.calib_every, window_s=args.calib_window, warn_deg=args.calib_warn_deg)
+
+
+def sim_error_cameras(cams, specs: list[str]):
+    """'이름:yaw:pitch' 목록대로 각도를 더한 카메라 사본 목록(sim 영상 그리기 전용). 목록이 비면 cams 그대로."""
+    if not specs:
+        return cams
+    out = list(cams)
+    for spec in specs:
+        name, dy, dp = spec.split(":")
+        k = next((i for i, c in enumerate(cams) if c.name == name), None)
+        if k is None:
+            raise SystemExit(f"--sim-angle-error: 설정에 없는 카메라 {name}")
+        out[k] = dataclasses.replace(cams[k], yaw_deg=cams[k].yaw_deg + float(dy),
+                                     pitch_deg=cams[k].pitch_deg + float(dp))
+    return out
+
+
 def make_view3d_config(args, cfg: dict):
     """3D 시점 설정. 설정 파일의 view3d 항목(있으면)을 바탕으로 명령줄 옵션을 덮어쓴다."""
     from realityview.render3d import View3DConfig
@@ -469,7 +501,8 @@ def main() -> None:
     if args.backend == "sim":
         from realityview.sim import SimBackend, SimWorld, default_traffic_lights
 
-        world = SimWorld(cams, curvature=args.sim_curvature,
+        # --sim-angle-error: sim 영상만 일부러 틀어진 카메라로 그린다(처리는 설정 값 그대로). 보정 점검 시험용
+        world = SimWorld(sim_error_cameras(cams, args.sim_angle_error), curvature=args.sim_curvature,
                          traffic_lights=default_traffic_lights() if args.sim_lights else None)
         backend = SimBackend(world)
     else:
@@ -599,6 +632,7 @@ def main() -> None:
         lanes=LaneConfig() if args.lanes else None,
         lanes_every=args.lanes_every,
         traffic_lights=TrafficLightConfig() if args.traffic_lights else None,
+        calib_monitor=make_calib_monitor_config(args),
     )
     if args.skew_comp and not args.sync:
         print("--skew-comp 는 --sync 와 같이 써야 동작합니다(지금은 꺼진 것과 같음)", flush=True)
@@ -744,6 +778,8 @@ def main() -> None:
                 break
             # 2) 검출부터 렌더링까지
             out = pipe.step(frames, dt, offsets)
+            if out.calib_warnings:
+                draw_warnings(out.dashboard, out.calib_warnings)  # 화면 왼쪽 아래에 보정 점검 경고
             if monitor is not None:
                 draw_label(out.dashboard, monitor.state())  # 화면 오른쪽 위에 과열 단계 표시
             done_ns = time.monotonic_ns()  # 대시보드 완성 시각(녹화, 화면 표시 전)
@@ -815,6 +851,8 @@ def main() -> None:
             print(f"thermal_summary={json.dumps(monitor.close(), ensure_ascii=False)}", flush=True)
             if gate is not None:
                 print(f"thermal_gate=ran {gate.ran} skipped {gate.skipped}", flush=True)
+        if pipe.calib_monitor is not None:
+            print(f"calib_monitor={json.dumps(pipe.calib_monitor.summary(), ensure_ascii=False)}", flush=True)
         if clipper is not None:
             # 모으던 클립까지 저장하고 쓰기 스레드를 끝낸다
             trig_stats = clipper.close()

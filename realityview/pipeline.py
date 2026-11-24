@@ -40,6 +40,7 @@ class StepOutput:
     view3d: np.ndarray | None = None  # 3D 시점 화면만(view가 "3d", "both"일 때)
     lanes: list[LaneCurve] | None = None  # 차선 곡선(평활 후). lanes 옵션이 꺼져 있으면 None
     lights: list[TrafficLight] | None = None  # 신호등 상태. traffic_lights 옵션이 꺼져 있으면 None
+    calib_warnings: list[str] | None = None  # 보정 점검 경고 글. calib_monitor 옵션이 꺼져 있으면 None
 
 
 @dataclass
@@ -252,6 +253,7 @@ class RealityViewPipeline:
         lanes: LaneConfig | None = None,  # 주면 차선 검출을 켠다(기본 꺼짐)
         lanes_every: int = 1,  # 차선 검출을 몇 프레임마다 할지. 그 사이는 지난 결과를 쓴다
         traffic_lights: TrafficLightConfig | None = None,  # 주면 신호등 색 판별을 켠다(기본 꺼짐)
+        calib_monitor=None,  # CalibMonitorConfig를 주면 주행 중 보정 점검을 켠다(기본 꺼짐, 경고만 내고 설정은 안 바꿈)
     ):
         self.cameras = cameras
         self.scale = float(scale)
@@ -288,6 +290,13 @@ class RealityViewPipeline:
         self.lanes_every = max(1, int(lanes_every))
         self._lanes: list[LaneCurve] | None = [] if lanes else None
         self.light_reader = TrafficLightReader(cameras, traffic_lights, self.scale) if traffic_lights else None
+        # 보정 점검(옵션): 카메라마다 자기 셀에서 차선을 찾아 소실점으로 각도 차이를 잰다(calib_monitor.py)
+        self.calib_monitor = None
+        if calib_monitor is not None:
+            from .calib_monitor import CalibMonitor
+
+            self.calib_monitor = CalibMonitor(cameras, self.grid, self.ipm.owner, self.scale, calib_monitor,
+                                              lanes or LaneConfig())
         # 차선과 신호등 통계(측정 기록용): 차선 검출 횟수, 찾은 곡선 수 합, 내 차선 양쪽을 찾은 횟수, 신호등 색별 수
         self._lane_runs = 0
         self._lane_sum = 0
@@ -419,8 +428,10 @@ class RealityViewPipeline:
         need_ground = self.show_ground and (self.view != "3d" or refresh or self._worker is not None)
         #    차선 검출 차례이면 화면에 바닥을 안 깔아도(--no-ground) 바닥 영상을 합성한다
         lane_turn = self.lane_detector is not None and idx % self.lanes_every == 0
+        #    보정 점검 차례(옵션)에도 바닥 영상이 필요하다
+        mon_turn = self.calib_monitor is not None and idx % max(1, int(self.calib_monitor.cfg.every)) == 0
         with tm.stage("bev_warp"):
-            ground = self.ipm.warp(frames) if (need_ground or lane_turn) else None
+            ground = self.ipm.warp(frames) if (need_ground or lane_turn or mon_turn) else None
             road = self._warp_road(results, frames)
         # 5-1) 차선(옵션): 차례인 프레임에만 찾고 평활한다. 그 사이 프레임은 지난 결과를 그대로 쓴다
         if lane_turn:
@@ -435,6 +446,10 @@ class RealityViewPipeline:
             self._lane_runs += 1
             self._lane_sum += len(self._lanes)
             self._lane_ego += int({"left", "right"} <= {ln.side for ln in self._lanes})
+        # 5-2) 보정 점검(옵션): 차례인 프레임에만 본다. 경고는 화면과 로그에 남기고 설정은 바꾸지 않는다
+        if mon_turn:
+            with tm.stage("calib_monitor"):
+                self.calib_monitor.update(ground, self._time)
         if not need_ground:
             ground = None  # 차선 때문에 합성한 바닥은 화면에 깔지 않는다(예전 화면 그대로)
         self._time += float(dt)
@@ -468,7 +483,9 @@ class RealityViewPipeline:
         t3 = time.perf_counter()
 
         timings = {"npu_ms": (t1 - t0) * 1e3, "bev_ms": (t2 - t1) * 1e3, "render_ms": (t3 - t2) * 1e3}
-        return StepOutput(dash, bev, tracks, results, timings, v3d, lanes=self._lanes, lights=lights)
+        warns = self.calib_monitor.warnings if self.calib_monitor is not None else None
+        return StepOutput(dash, bev, tracks, results, timings, v3d, lanes=self._lanes, lights=lights,
+                          calib_warnings=warns)
 
     def _warp_road(self, results: list[FrameResult], frames: list[np.ndarray]) -> np.ndarray | None:
         """카메라별 도로 마스크를 탑뷰 한 장으로 합성한다. 마스크가 지난 프레임과 같으면 지난 결과를 다시 쓴다.
