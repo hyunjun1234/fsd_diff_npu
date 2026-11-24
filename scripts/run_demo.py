@@ -52,6 +52,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="none",
         help="도로 세그를 다른 NPU의 별도 스레드에서 실행(dxm1: 설정의 npu.dx_seg_model 사용). 기본 none",
     )
+    ap.add_argument(
+        "--seg-mask-test",
+        choices=["none", "random50"],
+        default="none",
+        help="시험용: --seg-npu 세그는 그대로 돌리고 마스크만 화소 50%%가 1인 무작위 마스크로 바꿈(렌더링 비용 측정). 기본 none",
+    )
     ap.add_argument("--video", action="append", default=[], help="name=path 형식으로 카메라 입력을 파일로 대체")
     ap.add_argument("--model", default="yolov8n.pt", help="ultralytics 백엔드 모델")
     ap.add_argument("--frames", type=int, default=0, help="0이면 무한")
@@ -93,9 +99,12 @@ def profile_report(args, timer: StageTimer, pipe, health_start: dict, loop: dict
             "bev_size_hw": [pipe.grid.height, pipe.grid.width],
             "render_thread": args.render_thread,
             "seg_npu": args.seg_npu,
+            "seg_mask_test": args.seg_mask_test,
             "warmup": timer.warmup,
         },
         "seg_stats": pipe.seg_stats,
+        # 탑뷰 도로 마스크 캐시: 마스크가 그대로라 합성을 건너뛴 수(hits)와 다시 합성한 수(misses)
+        "road_cache": {"hits": pipe.road_cache_hits, "misses": pipe.road_cache_misses},
         "cameras": [{"name": c.name, "width": c.width, "height": c.height} for c in pipe.cameras],
         "frames_total": loop.get("frames", 0),
         "frames_measured": measured,
@@ -144,7 +153,11 @@ def make_dxm1_backend(npu: dict, timer: StageTimer, det: bool):
 # 실행
 # ---------------------------------------------------------------------------
 def main() -> None:
-    args = build_parser().parse_args()
+    ap = build_parser()
+    args = ap.parse_args()
+    if args.seg_mask_test != "none" and args.seg_npu == "none":
+        # 바꿔 줄 세그 출력이 없으니 아무 효과가 없다. 조용히 넘어가지 않고 알려 준다
+        ap.error("--seg-mask-test 는 --seg-npu dxm1 과 같이 써야 합니다")
 
     cams, grid, cfg = load_config(args.config)
     if args.bev_res:
@@ -208,6 +221,11 @@ def main() -> None:
                 s.close()
             backend.close()
             raise
+        if args.seg_mask_test == "random50":
+            # NPU 추론은 그대로 두고 마스크만 무작위 50%로 바꾼다(렌더링 비용을 정해진 도로 비율로 재기)
+            from realityview.sim import ForcedMaskSeg
+
+            seg_backend = ForcedMaskSeg(seg_backend, fraction=0.5)
 
     pipe = RealityViewPipeline(
         cams,

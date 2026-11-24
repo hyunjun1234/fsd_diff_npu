@@ -1,8 +1,3 @@
-"""하드웨어 없이 파이프라인 전체를 확인하기 위한 간단한 합성 장면.
-
-3차로 도로와 주변 차량/보행자를 차량 좌표계에서 움직이고, 각 카메라 영상을 광선-지면 교차로 그린다.
-SimBackend는 정답 박스에 잡음을 섞어 '검출기 출력'처럼 돌려준다.
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -12,6 +7,11 @@ import numpy as np
 
 from .camera_model import Camera
 from .types import Detection, FrameResult
+
+# 하드웨어 없이 파이프라인 전체를 확인하기 위한 간단한 합성 장면.
+# 3차로 도로와 주변 차량/보행자를 차량 좌표계에서 움직이고, 각 카메라 영상을 광선-지면 교차로 그린다.
+# SimBackend는 정답 박스에 잡음을 섞어 '검출기 출력'처럼 돌려준다.
+# ForcedMaskSeg는 세그 출력 마스크를 무작위 마스크로 바꾸는 렌더링 비용 시험용 감싸개다.
 
 LANE_W = 3.5
 ROAD_HALF = 1.5 * LANE_W  # 3차로
@@ -161,3 +161,44 @@ class SimBackend:
 
     def close(self) -> None:
         pass
+
+
+# ---------------------------------------------------------------------------
+# 렌더링 비용 시험용: 세그 출력 마스크를 무작위 마스크로 바꾸는 감싸개
+# ---------------------------------------------------------------------------
+class ForcedMaskSeg:
+    """세그 백엔드를 감싸서, NPU 추론은 그대로 돌리고 돌려줄 마스크만 무작위 마스크로 바꾼다.
+
+    진짜 세그 모델이 없을 때(드론 모델을 세그 자리에 넣은 맛보기) 마스크 칠하기 비용을
+    정해진 도로 비율로 재려고 쓴다. run_demo.py의 --seg-mask-test random50 이 이것을 켠다.
+
+    - 마스크는 화소마다 fraction 확률로 1이 되는 무작위 0/1(uint8)이다(같은 seed면 늘 같다).
+    - 매번 새로 만들면 세그 스레드의 CPU를 잡아먹어 측정을 흐리므로, 카메라 크기마다 pool 장을
+      미리 만들어 두고 호출마다 돌려 가며 준다. 이웃한 두 호출은 늘 다른 배열을 받으므로
+      파이프라인 입장에서는 "세그가 새 마스크를 냈다"와 같다.
+    - 돌려주는 배열은 여러 번 다시 쓰이므로 받는 쪽에서 고치면 안 된다(파이프라인은 읽기만 한다).
+    """
+
+    def __init__(self, inner, fraction: float = 0.5, pool: int = 2, seed: int = 0):
+        self.inner = inner  # 진짜 세그 백엔드(예: DXM1Backend). segment()와 close()만 쓴다
+        self.fraction = float(fraction)
+        self.pool = max(2, int(pool))
+        self._rng = np.random.default_rng(seed)
+        self._masks: dict[tuple[int, int], list[np.ndarray]] = {}  # (h, w) → 미리 만든 마스크들
+        self.calls = 0
+
+    def _pool_for(self, hw: tuple[int, int]) -> list[np.ndarray]:
+        if hw not in self._masks:
+            self._masks[hw] = [(self._rng.random(hw) < self.fraction).astype(np.uint8) for _ in range(self.pool)]
+        return self._masks[hw]
+
+    def segment(self, frames) -> list[np.ndarray]:
+        # 1) NPU 추론과 그 후처리는 원래대로 돌린다(NPU 부하와 세그 스레드 CPU 사용을 그대로 두려고)
+        self.inner.segment(frames)
+        # 2) 결과는 버리고 미리 만든 무작위 마스크를 돌려준다
+        k = self.calls % self.pool
+        self.calls += 1
+        return [self._pool_for(tuple(f.shape[:2]))[k] for f in frames]
+
+    def close(self) -> None:
+        self.inner.close()

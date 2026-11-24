@@ -244,6 +244,12 @@ class RealityViewPipeline:
         self._frame_idx = 0
         self._seg_ages: list[int] = []  # 프레임마다 쓴 마스크가 몇 프레임 묵었는지(마스크가 있을 때만)
         self._seg_missing = 0  # 아직 첫 마스크가 없어 마스크 없이 지나간 프레임 수
+        self._seg_last_idx = None  # 마지막으로 도로 비율을 센 마스크의 프레임 번호
+        self._seg_fracs: list[float] = []  # 새 마스크마다 도로 화소 비율(카메라 평균)
+        # 탑뷰 도로 마스크 캐시: (카메라별 원본 마스크 객체 목록, 합성한 탑뷰 마스크)
+        self._road_cache: tuple[list, np.ndarray] | None = None
+        self.road_cache_hits = 0  # 마스크가 그대로라 합성을 건너뛴 프레임 수
+        self.road_cache_misses = 0  # 새 마스크라 다시 합성한 프레임 수
 
     # ---- 화면 갱신 횟수 -------------------------------------------------
     @property
@@ -263,6 +269,7 @@ class RealityViewPipeline:
         submitted/done/dropped: 넘긴, 끝낸, 시작 전에 밀려 버린 작업 수
         mask_age_mean/max: 쓴 마스크가 평균, 최대 몇 프레임 묵었는지(0이면 같은 프레임 영상의 마스크)
         frames_without_mask: 첫 마스크가 나오기 전이라 마스크 없이 지나간 프레임 수
+        mask_fraction_mean: 받은 마스크의 도로 화소 비율 평균(0~1). 렌더링 비용 비교에 쓴다
         """
         if self._seg is None:
             return None
@@ -275,6 +282,7 @@ class RealityViewPipeline:
             "mask_age_mean": float(np.mean(ages)) if ages else None,
             "mask_age_max": int(max(ages)) if ages else None,
             "frames_without_mask": self._seg_missing,
+            "mask_fraction_mean": float(np.mean(self._seg_fracs)) if self._seg_fracs else None,
         }
 
     # ---- 한 프레임 처리 -------------------------------------------------
@@ -314,13 +322,7 @@ class RealityViewPipeline:
         # 5) 바닥 영상과 도로 마스크를 탑뷰로 합성(IPM remap)
         with tm.stage("bev_warp"):
             ground = self.ipm.warp(frames) if self.show_ground else None
-            road = None
-            if any(r.road_mask is not None for r in results):
-                masks = [
-                    r.road_mask if r.road_mask is not None else np.zeros(f.shape[:2], np.uint8)
-                    for r, f in zip(results, frames)
-                ]
-                road = self.ipm.warp(masks, interpolation=0)
+            road = self._warp_road(results, frames)
         t2 = time.perf_counter()
 
         # 화면에 찍는 FPS는 step() 호출 간격(카메라 획득까지 포함한 실제 갱신 주기)으로 구한다
@@ -351,6 +353,32 @@ class RealityViewPipeline:
         timings = {"npu_ms": (t1 - t0) * 1e3, "bev_ms": (t2 - t1) * 1e3, "render_ms": (t3 - t2) * 1e3}
         return StepOutput(dash, bev, tracks, results, timings)
 
+    def _warp_road(self, results: list[FrameResult], frames: list[np.ndarray]) -> np.ndarray | None:
+        """카메라별 도로 마스크를 탑뷰 한 장으로 합성한다. 마스크가 지난 프레임과 같으면 지난 결과를 다시 쓴다.
+
+        세그는 N 프레임마다만 돌고 그 사이에는 같은 마스크 배열이 그대로 붙어 온다(세그 스레드, HailoBackend 모두).
+        그래서 카메라마다 "같은 배열 객체인가(is)"로 비교해 모두 같으면 remap을 건너뛴다.
+        - id() 숫자만 비교하면 옛 배열이 지워진 자리에 새 배열이 같은 번호로 생길 수 있어서,
+          옛 마스크 객체를 직접 들고 있다가 is로 비교한다.
+        - 마스크를 그 자리에서 고치는 백엔드라면 이 캐시가 틀린 그림을 줄 수 있다. 지금 백엔드는
+          모두 마스크를 새 배열로 만들고 고치지 않는다(sim은 매 프레임 새 배열이라 캐시가 늘 빗나간다).
+        - 돌려주는 탑뷰 마스크는 여러 프레임이 같이 쓰므로 받는 쪽은 읽기만 한다(render_bev는 고치지 않는다).
+        """
+        keys = [r.road_mask for r in results]
+        if all(k is None for k in keys):
+            self._road_cache = None
+            return None
+        cache = self._road_cache
+        if cache is not None and len(cache[0]) == len(keys) and all(a is b for a, b in zip(cache[0], keys)):
+            self.road_cache_hits += 1
+            return cache[1]
+        # 마스크가 없는 카메라는 빈 마스크로 채워 합성한다
+        masks = [k if k is not None else np.zeros(f.shape[:2], np.uint8) for k, f in zip(keys, frames)]
+        road = self.ipm.warp(masks, interpolation=0)
+        self._road_cache = (keys, road)
+        self.road_cache_misses += 1
+        return road
+
     def _attach_async_masks(self, idx: int, results: list[FrameResult]) -> None:
         latest = self._seg.latest()  # 세그 스레드가 예외로 멈췄으면 여기서 다시 낸다
         if latest is None or len(latest[1]) != len(results):
@@ -361,6 +389,10 @@ class RealityViewPipeline:
         for r, m in zip(results, masks):
             r.road_mask = m
         self._seg_ages.append(idx - mask_idx)
+        # 새 마스크가 들어왔을 때만 도로 비율(1인 화소 비율)을 센다. 렌더링 비용이 이 비율에 따라 달라서 기록해 둔다
+        if mask_idx != self._seg_last_idx:
+            self._seg_last_idx = mask_idx
+            self._seg_fracs.append(float(np.mean([np.count_nonzero(m) / max(m.size, 1) for m in masks])))
 
     def _render(self, job: _RenderJob) -> tuple[np.ndarray, np.ndarray]:
         """탑뷰와 대시보드를 그린다. 같은 스레드와 렌더링 스레드가 함께 쓴다."""

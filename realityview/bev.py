@@ -1,4 +1,3 @@
-"""BEV 격자, 카메라 영상/마스크의 IPM 합성, 검출 결과의 지면 투영."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -9,6 +8,12 @@ import numpy as np
 from .camera_model import Camera
 from .types import Detection, GroundObject
 
+# BEV 격자, 카메라 영상/마스크의 IPM 합성, 검출 결과의 지면 투영.
+
+
+# ---------------------------------------------------------------------------
+# 탑뷰 격자
+# ---------------------------------------------------------------------------
 
 @dataclass
 class BevGrid:
@@ -44,6 +49,9 @@ class BevGrid:
         return np.stack([col, row], axis=1)
 
 
+# ---------------------------------------------------------------------------
+# IPM 합성(카메라 영상, 마스크 → 탑뷰)
+# ---------------------------------------------------------------------------
 class IpmCompositor:
     """카메라마다 BEV 셀 → 이미지 픽셀 LUT를 미리 계산해 cv2.remap으로 합성한다.
 
@@ -78,12 +86,22 @@ class IpmCompositor:
             my = np.where(inside, uv[:, 1], -1).astype(np.float32).reshape(H, W)
             self.maps.append(cv2.convertMaps(mx, my, cv2.CV_16SC2))
         self.owner = self.owner.reshape(H, W)
+        # 매 프레임 쓰는 "카메라 i가 맡은 셀" 마스크를 미리 uint8로 만들어 둔다.
+        # 예전에는 warp()마다 owner == i 비교와 numpy 불리언 색인 복사를 해서 파이5에서 바닥 영상
+        # 합성에 22ms가 들었다. cv2.copyTo는 같은 일을 마스크 자리만 골라 복사해서 훨씬 빠르고 결과는 똑같다.
+        self._owner_u8 = [np.ascontiguousarray((self.owner == i).astype(np.uint8)) for i in range(len(cameras))]
+        self._coverage = self.owner >= 0
+        self._coverage.flags.writeable = False  # 여러 프레임이 같이 쓰므로 고치지 못하게 막는다
 
     def coverage(self) -> np.ndarray:
-        return self.owner >= 0
+        """카메라가 하나라도 보는 셀(bool, H x W). 읽기 전용 배열을 매번 같은 것으로 돌려준다."""
+        return self._coverage
 
     def warp(self, images: list[np.ndarray], interpolation: int = cv2.INTER_LINEAR) -> np.ndarray:
-        """카메라 영상(또는 마스크) 목록을 BEV 한 장으로 합성. 채널 수는 입력과 같다."""
+        """카메라 영상(또는 마스크) 목록을 BEV 한 장으로 합성. 채널 수는 입력과 같다.
+
+        카메라마다 1) LUT로 remap 해서 탑뷰 크기로 펴고 2) 그 카메라가 맡은 셀만 결과에 복사한다.
+        """
         if len(images) != len(self.cameras):
             raise ValueError("images and cameras length mismatch")
         out = None
@@ -93,13 +111,15 @@ class IpmCompositor:
             w = cv2.remap(img, m1, m2, interpolation, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
             if out is None:
                 out = np.zeros_like(w)
-            sel = self.owner == i
-            out[sel] = w[sel]
+            cv2.copyTo(w, self._owner_u8[i], out)  # 맡은 셀만 복사(out을 그 자리에서 고침)
         if out is None:
             out = np.zeros((self.grid.height, self.grid.width, 3), np.uint8)
         return out
 
 
+# ---------------------------------------------------------------------------
+# 검출 결과의 지면 투영과 카메라 간 병합
+# ---------------------------------------------------------------------------
 # 클래스별 기본 크기 (길이, 폭) m. 단안 박스 폭이 부정확할 때 표시용으로 쓴다.
 DEFAULT_SIZE = {
     "car": (4.5, 1.9),
