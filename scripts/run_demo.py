@@ -27,6 +27,14 @@ from realityview.profiling import StageTimer, format_table, read_pi_health  # no
 #   timeout -s INT -k 10 180 python scripts/run_demo.py --config configs/two_cam_current.yaml \
 #       --backend hailo --headless --frames 330 --profile --profile-out out/measure/01_profile_base.json
 #
+#   # DX-M1 단독 검출 (.dxnn을 models/에 두고 설정의 npu.dx_det_model에 적은 뒤)
+#   timeout -s INT -k 10 180 python scripts/run_demo.py --config configs/two_cam_current.yaml \
+#       --backend dxm1 --headless --frames 330 --profile --profile-out out/measure/02_profile_dxm1.json
+#
+#   # 두 NPU 동시: 검출은 Hailo-8, 도로 세그는 DX-M1 별도 스레드(npu.seg_every 프레임마다)
+#   timeout -s INT -k 10 180 python scripts/run_demo.py --config configs/two_cam_current.yaml \
+#       --backend hailo --seg-npu dxm1 --headless --frames 330 --profile --profile-out out/measure/02_profile_dual.json
+#
 #   # PC에서 녹화 영상으로 개발 (ultralytics 필요)
 #   python scripts/run_demo.py --backend ultralytics --video front=rec/front.mp4 --video rear=rec/rear.mp4
 
@@ -37,7 +45,13 @@ from realityview.profiling import StageTimer, format_table, read_pi_health  # no
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="configs/two_cam.yaml")
-    ap.add_argument("--backend", choices=["hailo", "ultralytics", "sim"], default="sim")
+    ap.add_argument("--backend", choices=["hailo", "dxm1", "ultralytics", "sim"], default="sim")
+    ap.add_argument(
+        "--seg-npu",
+        choices=["none", "dxm1"],
+        default="none",
+        help="도로 세그를 다른 NPU의 별도 스레드에서 실행(dxm1: 설정의 npu.dx_seg_model 사용). 기본 none",
+    )
     ap.add_argument("--video", action="append", default=[], help="name=path 형식으로 카메라 입력을 파일로 대체")
     ap.add_argument("--model", default="yolov8n.pt", help="ultralytics 백엔드 모델")
     ap.add_argument("--frames", type=int, default=0, help="0이면 무한")
@@ -78,8 +92,10 @@ def profile_report(args, timer: StageTimer, pipe, health_start: dict, loop: dict
             "bev_res": pipe.grid.res,
             "bev_size_hw": [pipe.grid.height, pipe.grid.width],
             "render_thread": args.render_thread,
+            "seg_npu": args.seg_npu,
             "warmup": timer.warmup,
         },
+        "seg_stats": pipe.seg_stats,
         "cameras": [{"name": c.name, "width": c.width, "height": c.height} for c in pipe.cameras],
         "frames_total": loop.get("frames", 0),
         "frames_measured": measured,
@@ -93,6 +109,35 @@ def profile_report(args, timer: StageTimer, pipe, health_start: dict, loop: dict
         "table_md": format_table(summary),
         **extra,
     }
+
+
+# ---------------------------------------------------------------------------
+# DX-M1 백엔드 만들기
+# ---------------------------------------------------------------------------
+def make_dxm1_backend(npu: dict, timer: StageTimer, det: bool):
+    """설정의 npu 항목으로 DXM1Backend를 만든다.
+
+    det=True: --backend dxm1 (검출 + 설정에 dx_seg_model이 있으면 세그도 같은 백엔드에서)
+    det=False: --seg-npu dxm1 (세그만, 파이프라인의 별도 스레드가 segment()를 부른다)
+    모델 경로가 설정에 없거나 파일이 없으면 무엇을 어디에 둘지 알려 주는 오류가 난다.
+    """
+    from realityview.detectors import DX_MODEL_HELP, DXM1Backend
+
+    key = "dx_det_model" if det else "dx_seg_model"
+    if not npu.get(key):
+        raise SystemExit(f"설정 파일의 npu.{key} 가 비어 있습니다.\n" + DX_MODEL_HELP.format(key=key))
+    return DXM1Backend(
+        npu["dx_det_model"] if det else None,
+        npu.get("dx_seg_model") if det else npu["dx_seg_model"],
+        score_thr=float(npu.get("score_thr", 0.4)),
+        iou_thr=float(npu.get("dx_iou_thr", 0.45)),
+        road_classes=npu.get("road_classes", [0]),
+        seg_every=int(npu.get("seg_every", 3)),
+        timer=timer,
+        det_format=npu.get("dx_det_format", "yolov8"),
+        input_rgb=bool(npu.get("dx_input_rgb", True)),
+        seg_channels_first=bool(npu.get("dx_seg_channels_first", True)),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -139,13 +184,40 @@ def main() -> None:
                 seg_every=int(npu.get("seg_every", 3)),
                 timer=timer,
             )
+        elif args.backend == "dxm1":
+            try:
+                backend = make_dxm1_backend(npu, timer, det=True)
+            except BaseException:
+                # 모델 파일이 없어 실패해도 이미 연 카메라는 놓아 준다
+                for s in sources:
+                    s.close()
+                raise
         else:
             from realityview.detectors import UltralyticsBackend
 
             backend = UltralyticsBackend(args.model, float(npu.get("score_thr", 0.4)))
 
+    # ---- 두 NPU 동시 실행 옵션: 세그를 DX-M1 별도 스레드에서 ----
+    seg_backend = None
+    if args.seg_npu == "dxm1":
+        try:
+            seg_backend = make_dxm1_backend(npu, timer, det=False)
+        except BaseException:
+            # 세그 모델이 없으면 이미 연 카메라와 검출 NPU를 놓아 주고 오류를 그대로 보여 준다
+            for s in sources:
+                s.close()
+            backend.close()
+            raise
+
     pipe = RealityViewPipeline(
-        cams, backend, grid, show_ground=not args.no_ground, timer=timer, render_thread=args.render_thread
+        cams,
+        backend,
+        grid,
+        show_ground=not args.no_ground,
+        timer=timer,
+        render_thread=args.render_thread,
+        seg_backend=seg_backend,
+        seg_every=int(npu.get("seg_every", 3)),
     )
 
     # ---- 메인 루프 ----

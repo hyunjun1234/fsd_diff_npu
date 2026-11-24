@@ -83,3 +83,11 @@ npu:
   road_classes: [0]                       # Cityscapes trainId 0 = road
   score_thr: 0.4
   seg_every: 3
+  # ---- DX-M1 (--backend dxm1, --seg-npu dxm1) ----
+  # .dxnn은 파이 저장소의 models/ 에 둔다. 얻는 방법은 out/measure/02_dxm1_backend.md 6장.
+  dx_det_model: models/yolov8s.dxnn       # NMS 전 YOLO 원시 출력 1개짜리 모델(CPU에서 NMS)
+  dx_det_format: yolov8                   # yolov8 = [cx,cy,w,h,클래스...], yolov5 = [cx,cy,w,h,물체,클래스...]
+  dx_seg_model: null                      # 도로 세그 .dxnn(--seg-npu dxm1에 필요). 출력 모양은 확인 필요
+  dx_input_rgb: true                      # Ultralytics 모델은 RGB 입력. BGR로 컴파일한 모델이면 false
+  dx_seg_channels_first: true             # 세그 로짓이 (1,C,H,W)면 true. dx_engine 출력은 NCHW로 확인함
+  dx_iou_thr: 0.45                        # CPU NMS의 IoU 기준

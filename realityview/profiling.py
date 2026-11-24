@@ -24,8 +24,10 @@ STAGE_ORDER = (
     "capture",       # 카메라 획득 (카메라 N대 읽기)
     "preprocess",    # 전처리 (BGR->RGB, 레터박스)
     "hailo_infer",   # Hailo 추론
+    "dxm1_infer",    # DX-M1 추론(카메라마다 run_async 후 모두 wait)
     "nms_parse",     # NMS 출력 파싱
     "seg",           # 세그 추론(있을 때만)
+    "seg_async",     # 별도 스레드 세그(검출과 다른 NPU, 끝난 프레임에만 기록)
     "detect_total",  # 검출 전체(위 세 단계 + 백엔드 기타)
     "ipm_project",   # 검출 박스 지면 투영
     "merge",         # 카메라 간 중복 병합
@@ -39,8 +41,10 @@ STAGE_LABEL_KO = {
     "capture": "카메라 획득",
     "preprocess": "전처리",
     "hailo_infer": "Hailo 추론",
+    "dxm1_infer": "DX-M1 추론",
     "nms_parse": "NMS 파싱",
     "seg": "세그 추론",
+    "seg_async": "세그 추론(별도 스레드)",
     "detect_total": "검출 합계",
     "ipm_project": "지면 투영(IPM)",
     "merge": "병합",

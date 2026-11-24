@@ -9,7 +9,7 @@ import numpy as np
 
 from .bev import BevGrid, IpmCompositor, merge_cross_camera, project_detections
 from .camera_model import Camera
-from .detectors import Backend
+from .detectors import Backend, SegBackend
 from .profiling import StageTimer
 from .render import annotate_camera, compose_dashboard, render_bev
 from .tracker import BevTracker, Track
@@ -18,6 +18,7 @@ from .types import FrameResult
 # 한 프레임 처리 순서
 #   카메라 프레임 -> 검출/세그(NPU) -> 지면 투영, 병합, 추적, 바닥 영상 합성(CPU) -> 렌더링
 # 렌더링은 기본으로 같은 스레드에서 하고, render_thread=True면 별도 스레드에서 한다.
+# seg_backend를 주면 도로 세그를 다른 NPU에서 별도 스레드로 N 프레임마다 돌리고, 늦으면 최근 마스크를 쓴다.
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +116,100 @@ class _RenderWorker:
 
 
 # ---------------------------------------------------------------------------
+# 세그 스레드 (계획 4.3절: 검출은 Hailo, 세그는 DX-M1을 N 프레임마다, 늦으면 최근 마스크 재사용)
+# ---------------------------------------------------------------------------
+class _SegWorker:
+    """다른 NPU에서 도로 세그를 돌리는 스레드. 구조는 _RenderWorker와 같다.
+
+    - 메인 루프는 N 프레임마다 submit()으로 카메라 영상을 넘기고 기다리지 않는다.
+      세그는 검출과 같은 시간에 다른 NPU에서 돈다.
+    - 아직 시작하지 못한 작업이 있는데 새 작업이 오면 옛 작업은 버린다(dropped).
+    - 메인 루프는 latest()로 가장 최근에 끝난 마스크를 가져다 쓴다. 세그가 늦으면
+      몇 프레임 전 마스크가 그대로 쓰인다(age로 몇 프레임 묵었는지 본다).
+    - 세그 함수가 예외를 내면 저장해 두었다가 메인 루프에서 다시 낸다(조용히 멈추지 않게).
+    """
+
+    def __init__(self, seg_fn, timer: StageTimer):
+        self._seg_fn = seg_fn  # frames → 카메라별 도로 마스크 목록
+        self._timer = timer
+        self._cond = threading.Condition()
+        self._job: tuple[int, list[np.ndarray]] | None = None
+        self._latest: tuple[int, list[np.ndarray]] | None = None  # (영상을 넘긴 프레임 번호, 마스크)
+        self._busy = False
+        self._stop = False
+        self.error: BaseException | None = None
+        self.submitted = 0  # 넘긴 작업 수
+        self.done = 0  # 끝낸 작업 수
+        self.dropped = 0  # 시작 전에 새 작업에 밀려 버린 수
+        self._thread = threading.Thread(target=self._run, name="seg", daemon=True)
+        self._thread.start()
+
+    def submit(self, frame_idx: int, frames: list[np.ndarray]) -> None:
+        # 카메라 소스가 버퍼를 다시 쓸 수 있으므로 복사해서 넘긴다(768x576 두 장에 1ms 안쪽)
+        job = (frame_idx, [np.array(f, copy=True) for f in frames])
+        with self._cond:
+            if self._job is not None:
+                self.dropped += 1
+            self._job = job
+            self.submitted += 1
+            self._cond.notify()
+
+    def latest(self) -> tuple[int, list[np.ndarray]] | None:
+        with self._cond:
+            if self.error is not None:
+                raise RuntimeError(f"세그 스레드가 멈췄습니다: {self.error!r}") from self.error
+            return self._latest
+
+    @property
+    def busy(self) -> bool:
+        with self._cond:
+            return self._busy or self._job is not None
+
+    def _run(self) -> None:
+        while True:
+            with self._cond:
+                while self._job is None and not self._stop:
+                    self._cond.wait()
+                if self._stop:
+                    return
+                (idx, frames), self._job = self._job, None
+                self._busy = True
+            t0 = time.perf_counter()
+            try:
+                masks = list(self._seg_fn(frames))
+            except BaseException as e:  # noqa: BLE001 - 메인 루프에 넘기려고 무엇이든 잡는다
+                with self._cond:
+                    self.error = e
+                    self._busy = False
+                return
+            self._timer.add("seg_async", (time.perf_counter() - t0) * 1e3)
+            with self._cond:
+                self._latest = (idx, masks)
+                self.done += 1
+                self._busy = False
+                self._cond.notify_all()
+
+    def wait_idle(self, timeout: float) -> bool:
+        """맡은 작업이 모두 끝날 때까지 기다린다(시험과 종료용). 끝났으면 True."""
+        deadline = time.monotonic() + timeout
+        with self._cond:
+            while (self._busy or self._job is not None) and self.error is None:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return False
+                self._cond.wait(left)
+            return True
+
+    def close(self, timeout: float = 5.0) -> bool:
+        """스레드를 멈추고 기다린다. 제때 끝났으면 True(그래야 NPU 엔진을 닫아도 안전하다)."""
+        with self._cond:
+            self._stop = True
+            self._cond.notify_all()
+        self._thread.join(timeout)
+        return not self._thread.is_alive()
+
+
+# ---------------------------------------------------------------------------
 # 파이프라인
 # ---------------------------------------------------------------------------
 class RealityViewPipeline:
@@ -127,6 +222,8 @@ class RealityViewPipeline:
         show_cameras: bool = True,  # False면 대시보드 오른쪽 카메라 영상을 그리지 않는다
         timer: StageTimer | None = None,  # 단계별 시간 측정(기본 꺼짐)
         render_thread: bool = False,  # True면 렌더링을 별도 스레드에서 한다(기본은 같은 스레드)
+        seg_backend: SegBackend | None = None,  # 주면 도로 세그를 이 백엔드로 별도 스레드에서 돌린다(기본 없음)
+        seg_every: int = 3,  # seg_backend가 있을 때 세그를 몇 프레임마다 넘길지
     ):
         self.cameras = cameras
         self.backend = backend
@@ -140,6 +237,13 @@ class RealityViewPipeline:
         self._last_step_t = None
         self._sync_renders = 0
         self._worker = _RenderWorker(self._render, self.timer) if render_thread else None
+        # 두 NPU 동시 실행 옵션: 검출은 backend(예: Hailo), 세그는 seg_backend(예: DX-M1)
+        self.seg_backend = seg_backend
+        self.seg_every = max(1, int(seg_every))
+        self._seg = _SegWorker(seg_backend.segment, self.timer) if seg_backend is not None else None
+        self._frame_idx = 0
+        self._seg_ages: list[int] = []  # 프레임마다 쓴 마스크가 몇 프레임 묵었는지(마스크가 있을 때만)
+        self._seg_missing = 0  # 아직 첫 마스크가 없어 마스크 없이 지나간 프레임 수
 
     # ---- 화면 갱신 횟수 -------------------------------------------------
     @property
@@ -152,15 +256,46 @@ class RealityViewPipeline:
         """렌더링 스레드가 그리기 전에 새 프레임에 밀려 버린 작업 수."""
         return self._worker.dropped if self._worker is not None else 0
 
+    @property
+    def seg_stats(self) -> dict | None:
+        """별도 스레드 세그의 통계. seg_backend가 없으면 None.
+
+        submitted/done/dropped: 넘긴, 끝낸, 시작 전에 밀려 버린 작업 수
+        mask_age_mean/max: 쓴 마스크가 평균, 최대 몇 프레임 묵었는지(0이면 같은 프레임 영상의 마스크)
+        frames_without_mask: 첫 마스크가 나오기 전이라 마스크 없이 지나간 프레임 수
+        """
+        if self._seg is None:
+            return None
+        ages = self._seg_ages
+        return {
+            "seg_every": self.seg_every,
+            "submitted": self._seg.submitted,
+            "done": self._seg.done,
+            "dropped": self._seg.dropped,
+            "mask_age_mean": float(np.mean(ages)) if ages else None,
+            "mask_age_max": int(max(ages)) if ages else None,
+            "frames_without_mask": self._seg_missing,
+        }
+
     # ---- 한 프레임 처리 -------------------------------------------------
     def step(self, frames: list[np.ndarray], dt: float) -> StepOutput:
         tm = self.timer
         t0 = time.perf_counter()
+        idx = self._frame_idx
+        self._frame_idx += 1
+
+        # 0) 별도 스레드 세그: N 프레임마다 영상을 넘긴다. 아래 검출과 같은 시간에 다른 NPU에서 돈다
+        if self._seg is not None and idx % self.seg_every == 0:
+            self._seg.submit(idx, frames)
 
         # 1) 검출(+세그). 전처리, NPU 추론, NMS 파싱의 세부 시간은 백엔드가 같은 타이머에 적는다
         with tm.stage("detect_total"):
             results = self.backend.infer(frames)
         t1 = time.perf_counter()
+
+        # 1-1) 별도 스레드 세그의 가장 최근 마스크를 붙인다. 이번 프레임 것이 아직이면 이전 마스크를 쓴다
+        if self._seg is not None:
+            self._attach_async_masks(idx, results)
 
         # 2) 검출 박스의 접지점을 지면(차량 좌표)으로 투영
         with tm.stage("ipm_project"):
@@ -216,6 +351,17 @@ class RealityViewPipeline:
         timings = {"npu_ms": (t1 - t0) * 1e3, "bev_ms": (t2 - t1) * 1e3, "render_ms": (t3 - t2) * 1e3}
         return StepOutput(dash, bev, tracks, results, timings)
 
+    def _attach_async_masks(self, idx: int, results: list[FrameResult]) -> None:
+        latest = self._seg.latest()  # 세그 스레드가 예외로 멈췄으면 여기서 다시 낸다
+        if latest is None or len(latest[1]) != len(results):
+            self._seg_missing += 1
+            return
+        mask_idx, masks = latest
+        # 세그 NPU를 따로 고른 것이므로 검출 백엔드가 만든 마스크가 있어도 이 마스크로 바꾼다
+        for r, m in zip(results, masks):
+            r.road_mask = m
+        self._seg_ages.append(idx - mask_idx)
+
     def _render(self, job: _RenderJob) -> tuple[np.ndarray, np.ndarray]:
         """탑뷰와 대시보드를 그린다. 같은 스레드와 렌더링 스레드가 함께 쓴다."""
         bev = render_bev(self.grid, job.tracks, job.ground, job.road, self.ipm.coverage())
@@ -231,4 +377,10 @@ class RealityViewPipeline:
     def close(self) -> None:
         if self._worker is not None:
             self._worker.close()
+        if self._seg is not None:
+            # 세그 스레드가 NPU를 쓰는 중에 엔진을 닫지 않도록 먼저 멈추고 기다린다
+            if self._seg.close(timeout=5.0):
+                self.seg_backend.close()
+            else:
+                print("경고: 세그 스레드가 5초 안에 끝나지 않아 세그 엔진을 닫지 않았습니다", flush=True)
         self.backend.close()
