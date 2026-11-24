@@ -24,6 +24,19 @@ Arducam IMX462 141도 모델은 화각이 대각 161도, 수평 141.4도, 수직
 
 Arducam IMX296 M12 모델은 1440x1080 글로벌 셔터 카메라이고 화각은 수평 45도입니다 [C4]. 빠르게 움직이는 장면에서 롤링 셔터 기울어짐이 없지만 HDR은 없습니다. 라즈베리파이 공식 글로벌 셔터 카메라도 같은 센서이며 렌즈를 따로 사는 C/CS 마운트 제품입니다.
 
+## 저조도 성능 비교
+
+| 제품 | 화소 크기 | 조리개 |
+|---|---|---|
+| Camera Module 3 | 1.4um | F1.8 |
+| Camera Module 3 Wide | 1.4um | F2.2 |
+| IMX708 쿼드 키트 | 1.4um | F2.2 |
+| Arducam IMX462 141도 | 2.9um | 확인 필요 |
+
+화소 크기와 조리개는 라즈베리파이 카메라 문서 [C8], Arducam 제품 페이지 [C2][C5]의 값입니다. IMX462는 화소 면적이 IMX708의 약 4.3배라 한 화소가 받는 빛이 훨씬 많고, 제조사는 0.001lux에서도 찍힌다고 적었습니다 [C2]. 렌즈 조리개는 표기가 없어 확인 필요입니다. 반대로 IMX708 계열은 저조도에 강한 센서가 아닙니다. 특히 Wide와 쿼드 키트는 F2.2라 일반형(F1.8)보다 빛을 약 1.5배 적게 받습니다.
+
+IMX708의 2304x1296 모드는 화소 4개를 묶어 읽는 방식이라 묶은 화소 하나의 크기가 2.8um에 해당합니다. NPU 입력이 640픽셀 안팎이라 이 모드나 더 작은 모드를 쓰게 되므로 실제 차이는 표의 화소 크기 차이보다 작을 것으로 보지만, 실측은 확인 필요입니다. 대신 IMX462는 HDR 표기가 없어서 터널 출구나 마주 오는 전조등처럼 밝기 차이가 큰 장면에는 약합니다. 밤과 역광 가운데 무엇을 우선하느냐에 따라 자리마다 고른 제품이 달라진 이유가 이것입니다.
+
 ## 테슬라 자리별 추천
 
 | 테슬라 자리 | 테슬라 화각 | 추천 제품 |
@@ -78,6 +91,7 @@ Arducam 멀티 카메라 어댑터(V2.2)는 여러 대를 붙여도 한 번에 �
 - C5: [Arducam 12MP IMX708 Quad-Camera Kit](https://www.arducam.com/arducam-12mp-imx708-quad-camera-kit-wide-angle-stereo-synchronized-camera-module-for-raspberry-pi.html)
 - C6: [Camarray Hat wont connect to Raspberry Pi 5, Arducam 포럼](https://forum.arducam.com/t/camarray-hat-wont-connect-to-raspberry-pi-5/8281)
 - C7: [Multi Camera Adapter Module V2.2, The Pi Hut](https://thepihut.com/products/multi-camera-adapter-module-v2-2-for-raspberry-pi)
+- C8: [Raspberry Pi 카메라 문서](https://www.raspberrypi.com/documentation/accessories/camera.html)
 - K1: [디바이스마트, 카메라모듈 3 와이드](https://www.devicemart.co.kr/goods/view?no=14933041)
 - K2: [디바이스마트, 카메라모듈 3 NoIR 와이드](https://www.devicemart.co.kr/goods/view?no=14944173)
 - K3: [디바이스마트, 카메라모듈 3](https://www.devicemart.co.kr/goods/view?no=14917048)
