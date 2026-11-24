@@ -6,4 +6,5 @@
 
 - [01. FSD v15 리얼리티 뷰 기술 조사](docs/01_fsd_v15_reality_view_research.md): 파이프라인, 사용 모델, HW3/AI4/AI5 칩 구조와 성능, 카메라 스펙
 - [02. 엣지 NPU 사양 비교](docs/02_edge_npu_spec_comparison.md): Hailo-8/8L/10H, DEEPX DX-M1 공식 사양과 테슬라 AI4 리얼리티 뷰 예산 비교
+- [03. 테슬라 카메라 배치와 시야](docs/03_tesla_camera_layout.md): 카메라별 장착 위치, 방향, 화각, 최대 거리와 3D 도면([viz/tesla_camera_layout_3d.html](viz/tesla_camera_layout_3d.html))
 - [엣지 NPU 구성과 모델 선정](docs/edge_npu_model_selection.md): 연산자 지원, BEV 모델 방식 비교, 단계별 계획
