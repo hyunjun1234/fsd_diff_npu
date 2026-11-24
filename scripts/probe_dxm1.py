@@ -10,6 +10,9 @@ import time
 
 import numpy as np
 
+# 저장소 루트를 import 경로에 넣는다(--image에서 realityview.detectors.letterbox를 쓰려고)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+
 # DX-M1(dx_engine) 실제 API 확인용 스크립트. 파이의 .venv에서 실행한다.
 #
 # 예)
@@ -31,6 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--model", help=".dxnn 경로. 없으면 장치 정보만 본다")
     ap.add_argument("--loops", type=int, default=50, help="시간 측정 반복 수(모델이 있을 때)")
     ap.add_argument("--out", help="결과 JSON 경로. 예: out/measure/02_dx_probe.json")
+    ap.add_argument("--image", help="무작위 값 대신 넣을 사진(레터박스해서 넣음). 출력 값 범위를 실제 장면으로 볼 때")
     return ap
 
 
@@ -67,16 +71,51 @@ def probe_device() -> dict:
 # ---------------------------------------------------------------------------
 # 모델 확인 (입출력 형식, 동기/비동기 실행, 시간)
 # ---------------------------------------------------------------------------
+def _dtype_name(v) -> str | None:
+    """dtype 값을 JSON에 쓸 문자열로. PPU 모델은 'BBOX' 같은 numpy가 모르는 이름을 주므로 그대로 둔다."""
+    if v is None:
+        return None
+    try:
+        return np.dtype(v).name
+    except TypeError:
+        return str(v)
+
+
 def _tensor_info(lst: list[dict]) -> list[dict]:
     """텐서 정보 사전의 dtype(numpy 타입)을 JSON에 쓸 수 있게 문자열로 바꾼다."""
-    return [{k: (np.dtype(v).name if k == "dtype" and v is not None else v) for k, v in d.items()} for d in lst]
+    return [{k: (_dtype_name(v) if k == "dtype" else v) for k, v in d.items()} for d in lst]
 
 
 def _describe(outs) -> list[dict]:
-    return [{"shape": list(np.asarray(o).shape), "dtype": np.asarray(o).dtype.name} for o in outs]
+    """출력마다 모양, 자료형, 값 범위. 구조체 배열(PPU 상자 목록)은 필드 이름과 앞 3개 값을 적는다."""
+    rep = []
+    for o in outs:
+        a = np.asarray(o)
+        d: dict = {"shape": list(a.shape), "dtype": str(a.dtype)}
+        if a.dtype.names:
+            d["fields"] = list(a.dtype.names)
+            d["first"] = [str(r) for r in a.reshape(-1)[:3]]
+        elif a.size and a.dtype.kind in "fiu":
+            d["min"], d["max"], d["mean"] = float(a.min()), float(a.max()), float(a.mean())
+        rep.append(d)
+    return rep
 
 
-def probe_model(path: str, loops: int) -> dict:
+def _image_input(path: str, shape: list[int]) -> np.ndarray:
+    """실제 사진을 모델 입력 크기로(레터박스, RGB) 만든다. 출력 값 범위를 실제 장면으로 보려고 쓴다."""
+    import cv2
+
+    from realityview.detectors import letterbox
+
+    img = cv2.imread(path)
+    if img is None:
+        raise FileNotFoundError(path)
+    hw = (shape[1], shape[2])  # dx_engine 입력은 NHWC로 확인함
+    lb, _, _ = letterbox(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), hw)
+    return np.ascontiguousarray(lb.reshape(shape))
+
+
+def probe_model(path: str, loops: int, image: str | None = None) -> dict:
     from dx_engine import InferenceEngine
 
     rep: dict = {"model": path}
@@ -92,10 +131,14 @@ def probe_model(path: str, loops: int) -> dict:
         rep["model_version"] = ie.get_model_version()
         rep["is_ppu"] = ie.is_ppu()
 
-        # ---- 입력: 보고된 shape과 dtype 그대로 만든 무작위 영상 ----
+        # ---- 입력: --image가 있으면 그 사진, 없으면 보고된 shape과 dtype 그대로 만든 무작위 영상 ----
         shape = [int(v) for v in ins[0]["shape"]]
         dtype = ins[0]["dtype"] or np.uint8
-        x = np.random.randint(0, 255, size=shape).astype(dtype)
+        if image:
+            x = _image_input(image, shape).astype(dtype)
+            rep["input_image"] = image
+        else:
+            x = np.random.randint(0, 255, size=shape).astype(dtype)
 
         # ---- 동기 실행 ----
         y = ie.run(x)
@@ -161,7 +204,7 @@ def main() -> int:
         if not os.path.isfile(args.model):
             print(f"모델 파일이 없습니다: {args.model}", file=sys.stderr)
             return 2
-        rep["model"] = probe_model(args.model, args.loops)
+        rep["model"] = probe_model(args.model, args.loops, args.image)
     text = json.dumps(rep, ensure_ascii=False, indent=2, default=str)
     print(text)
     if args.out:

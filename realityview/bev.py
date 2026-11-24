@@ -136,11 +136,14 @@ def project_detections(
     cam: Camera,
     dets: list[Detection],
     max_range: float = 40.0,
+    scale: float = 1.0,
 ) -> list[GroundObject]:
     """박스 하단 중앙(접지점)을 지면으로 투영한다.
 
     차량은 박스 하단이 가장 가까운 면이므로, 투영점을 카메라 시선 방향으로 차체 길이의 절반만큼
     밀어 중심을 추정한다. 보행자/이륜차는 그대로 쓴다.
+    scale: 장면 축척. 책상 위 모형(장난감 차)이면 실제 차에 대한 모형 크기 비율(예: 0.15)을 주어
+           기본 크기와 거리 문턱값을 같은 비율로 줄인다. 1.0이면 예전과 같다.
     """
     if not dets:
         return []
@@ -155,14 +158,15 @@ def project_detections(
         if not vc[k]:
             continue
         length, width = DEFAULT_SIZE.get(d.label, (1.0, 1.0))
+        length, width = length * scale, width * scale  # 모형이면 크기도 축척만큼 작다
         xy = gc[k].copy()
         ray = xy - cam.position[:2]
         n = np.linalg.norm(ray)
-        if n > 1e-6 and length > 1.5:
+        if n > 1e-6 and length > 1.5 * scale:
             xy = xy + ray / n * (length / 2.0)
         if vl[k] and vr[k]:
             w_meas = float(np.linalg.norm(gl[k] - gr[k]))
-            if 0.3 < w_meas < 4.0:
+            if 0.3 * scale < w_meas < 4.0 * scale:
                 width = w_meas
         out.append(
             GroundObject(
@@ -177,8 +181,13 @@ def project_detections(
     return out
 
 
-def merge_cross_camera(objs: list[GroundObject], radius: float = 1.5) -> list[GroundObject]:
-    """카메라 경계에서 중복된 같은 객체를 합친다(점수 높은 순으로 흡수)."""
+def merge_cross_camera(objs: list[GroundObject], radius: float = 1.5, scale: float = 1.0) -> list[GroundObject]:
+    """카메라 경계에서 중복된 같은 객체를 합친다(점수 높은 순으로 흡수).
+
+    scale: 장면 축척(project_detections와 같은 값). 합칠 반경과 거리 가중의 하한을 같이 줄인다.
+    """
+    radius = radius * scale
+    floor = 1.0 * scale  # 아주 가까운 카메라 하나가 가중치를 독차지하지 않게 두는 거리 하한
     objs = sorted(objs, key=lambda o: -o.score)
     kept: list[GroundObject] = []
     for o in objs:
@@ -187,7 +196,7 @@ def merge_cross_camera(objs: list[GroundObject], radius: float = 1.5) -> list[Gr
             same_group = _group(k.label) == _group(o.label)
             if same_group and np.linalg.norm(k.xy - o.xy) < radius and k.cam_index != o.cam_index:
                 # 거리가 가까운 카메라의 추정이 더 정확하므로 가중 평균
-                wk, wo = 1.0 / max(k.distance, 1.0), 1.0 / max(o.distance, 1.0)
+                wk, wo = 1.0 / max(k.distance, floor), 1.0 / max(o.distance, floor)
                 k.xy = (k.xy * wk + o.xy * wo) / (wk + wo)
                 dup = True
                 break

@@ -224,12 +224,14 @@ class RealityViewPipeline:
         render_thread: bool = False,  # True면 렌더링을 별도 스레드에서 한다(기본은 같은 스레드)
         seg_backend: SegBackend | None = None,  # 주면 도로 세그를 이 백엔드로 별도 스레드에서 돌린다(기본 없음)
         seg_every: int = 3,  # seg_backend가 있을 때 세그를 몇 프레임마다 넘길지
+        scale: float = 1.0,  # 장면 축척. 책상 위 모형이면 실차 대비 비율(설정 scene.scale), 1.0이면 실차
     ):
         self.cameras = cameras
+        self.scale = float(scale)
         self.backend = backend
         self.grid = grid or BevGrid()
         self.ipm = IpmCompositor(cameras, self.grid)
-        self.tracker = BevTracker()
+        self.tracker = BevTracker(scale=self.scale)
         self.show_ground = show_ground
         self.show_cameras = show_cameras
         self.timer = timer or StageTimer(enabled=False)
@@ -309,11 +311,11 @@ class RealityViewPipeline:
         with tm.stage("ipm_project"):
             objs = []
             for i, (cam, r) in enumerate(zip(self.cameras, results)):
-                objs += project_detections(i, cam, r.detections)
+                objs += project_detections(i, cam, r.detections, max_range=40.0 * self.scale, scale=self.scale)
 
         # 3) 카메라 경계에서 겹친 같은 물체 합치기
         with tm.stage("merge"):
-            objs = merge_cross_camera(objs)
+            objs = merge_cross_camera(objs, scale=self.scale)
 
         # 4) 추적(ID 유지, 속도 추정)
         with tm.stage("track"):
@@ -396,7 +398,7 @@ class RealityViewPipeline:
 
     def _render(self, job: _RenderJob) -> tuple[np.ndarray, np.ndarray]:
         """탑뷰와 대시보드를 그린다. 같은 스레드와 렌더링 스레드가 함께 쓴다."""
-        bev = render_bev(self.grid, job.tracks, job.ground, job.road, self.ipm.coverage())
+        bev = render_bev(self.grid, job.tracks, job.ground, job.road, self.ipm.coverage(), scale=self.scale)
         views = []
         if self.show_cameras:
             views = [

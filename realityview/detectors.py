@@ -225,8 +225,8 @@ class HailoBackend:
 #     run_async()를 보내고 wait()로 차례대로 받는다(동기 1개씩보다 약 2배 빨랐다).
 DX_MODEL_HELP = (
     "파이 저장소의 models/ 폴더에 .dxnn 파일을 두고 설정 파일 npu.{key} 에 경로를 적으세요 "
-    "(예: models/yolov8s.dxnn). .dxnn은 x86-64 리눅스에서 Ultralytics export(format=\"deepx\") 또는 "
-    "DX-COM으로 만들거나 DEEPX 공식 모델 저장소에서 받습니다. 자세한 방법은 out/measure/02_dxm1_backend.md 6장에 있습니다."
+    "(예: models/dxnn/yolov8-s_640x640_ppu.dxnn). DEEPX 공식 모델 저장소에서 받는 주소와 sha256은 "
+    "out/measure/05_dxnn_sources.md에, 직접 만드는 방법은 out/measure/02_dxm1_backend.md 6장에 있습니다."
 )
 
 
@@ -244,6 +244,15 @@ def _require_dx_model(path: str, key: str) -> None:
 # ---------------------------------------------------------------------------
 def _sigmoid(x: np.ndarray) -> np.ndarray:
     return 1.0 / (1.0 + np.exp(-x))
+
+
+# 확률(0~1)인지 로짓인지 가를 때 봐 주는 양자화 오차 폭
+_PROB_TOL = 1e-3
+
+
+def _looks_like_logits(x: np.ndarray) -> bool:
+    """값이 0~1 범위를 _PROB_TOL 넘게 벗어나면 시그모이드 전 로짓으로 본다."""
+    return bool(x.size) and (float(x.min()) < -_PROB_TOL or float(x.max()) > 1.0 + _PROB_TOL)
 
 
 def nms_numpy(boxes: np.ndarray, scores: np.ndarray, iou_thr: float, max_det: int = 100) -> np.ndarray:
@@ -311,12 +320,15 @@ def decode_yolo_raw(
         raise ValueError(f"{fmt} 출력의 채널 수({a.shape[1]})가 너무 작습니다. 받은 모양: {np.shape(out)}")
 
     # ---- 점수: 로짓(0~1 밖의 값)으로 나오면 시그모이드를 씌운다 ----
+    # DEEPX 공식 yolov8-s_640x640.dxnn은 이미 시그모이드를 거친 확률을 주는데, 양자화 때문에
+    # 최솟값이 -1.2e-7처럼 0보다 아주 조금 작게 나온다(2026-11-24 파이 실측). 0을 기준으로 가르면
+    # 확률에 시그모이드를 한 번 더 씌워 모든 상자가 0.5 이상이 되므로 여유(_PROB_TOL)를 둔다.
     cls = a[:, off:]
-    if cls.size and (cls.min() < 0.0 or cls.max() > 1.0):
+    if _looks_like_logits(cls):
         cls = _sigmoid(cls)
     if fmt == "yolov5":
         obj = a[:, 4]
-        if obj.min() < 0.0 or obj.max() > 1.0:
+        if _looks_like_logits(obj):
             obj = _sigmoid(obj)
         cls = cls * obj[:, None]
     cls_id = np.argmax(cls, axis=1)
@@ -388,6 +400,82 @@ def parse_dx_detections(
     return dets
 
 
+# ---------------------------------------------------------------------------
+# DX-M1: 장치 후처리(PPU) 모델 출력 해석
+# ---------------------------------------------------------------------------
+# DEEPX 공식 yolov8-s_640x640_ppu.dxnn(모델 저장소 2_4_0)으로 확인한 사실(2026-11-24, 파이)
+#   - get_output_tensors_info()는 이름 BBOX, dtype 'BBOX'(numpy가 모르는 이름), shape [8400]을 보고한다.
+#   - 실제 run()/wait()는 (1, N, 32) uint8 배열 하나를 준다. N은 장치 문턱값을 넘은 상자 수이고,
+#     상자가 하나도 없으면(검은 영상) 모양이 (0, 0)이다.
+#   - 32바이트는 DX-RT 헤더(/usr/local/include/dxrt/dxrt_cxx_api.h)의 DeviceBoundingBox_t와 같다.
+#       float x, y, w, h | uint8 grid_y, grid_x, box_idx, layer_idx | float score | uint32 label | 빈칸 4
+#   - YOLOv8 PPU는 x, y가 상자 중심, w, h가 폭과 높이이고 모두 모델 입력(레터박스 영상) 픽셀이다.
+#     DEEPX dx_app v3.2.2의 YOLOv8PPUPostprocessor도 앵커나 stride 계산 없이 이 값을 그대로 쓴다.
+#   - NMS는 장치에서 하지 않으므로 CPU에서 한다(dx_app도 CPU NMS).
+PPU_BBOX_DTYPE = np.dtype(
+    [
+        ("x", "<f4"), ("y", "<f4"), ("w", "<f4"), ("h", "<f4"),
+        ("grid_y", "u1"), ("grid_x", "u1"), ("box_idx", "u1"), ("layer_idx", "u1"),
+        ("score", "<f4"), ("label", "<u4"), ("pad", "V4"),
+    ]
+)
+assert PPU_BBOX_DTYPE.itemsize == 32
+
+
+def ppu_boxes(raw: np.ndarray) -> np.ndarray:
+    """PPU 출력 하나를 DeviceBoundingBox_t 구조체 배열(1차원)로 바꾼다.
+
+    raw: (1, N, 32) 또는 (N, 32) uint8, 빈 결과 (0, 0), 또는 이미 구조체 배열.
+    """
+    a = np.asarray(raw)
+    if a.dtype.names:
+        return a.reshape(-1)
+    if a.size == 0:
+        return np.zeros(0, dtype=PPU_BBOX_DTYPE)
+    if a.dtype != np.uint8 or a.shape[-1] != PPU_BBOX_DTYPE.itemsize:
+        raise ValueError(f"PPU 출력은 마지막 축이 32바이트인 uint8이어야 합니다. 받은 모양: {a.shape} {a.dtype}")
+    return np.ascontiguousarray(a.reshape(-1, PPU_BBOX_DTYPE.itemsize)).view(PPU_BBOX_DTYPE).reshape(-1)
+
+
+def parse_dx_ppu_detections(
+    outputs: Sequence[np.ndarray],
+    scale: float,
+    pad: tuple[int, int],
+    score_thr: float,
+    iou_thr: float = 0.45,
+    labels: dict | None = None,
+    max_det: int = 100,
+) -> list[Detection]:
+    """YOLOv8 PPU 모델 출력 → 원본 영상 좌표의 Detection (점수 거르기, 클래스 거르기, 클래스별 NMS)."""
+    if len(outputs) != 1:
+        raise ValueError(f"PPU 검출 모델은 출력이 1개여야 합니다. 받은 개수: {len(outputs)}")
+    b = ppu_boxes(outputs[0])
+    keep = COCO_KEEP if labels is None else labels
+    if len(b) == 0:
+        return []
+    score = b["score"].astype(np.float32)
+    cls_id = b["label"].astype(np.int64)
+    m = (score >= score_thr) & np.isin(cls_id, list(keep))
+    if not m.any():
+        return []
+    b, score, cls_id = b[m], score[m], cls_id[m]
+    boxes = np.stack(
+        [b["x"] - b["w"] / 2, b["y"] - b["h"] / 2, b["x"] + b["w"] / 2, b["y"] + b["h"] / 2], axis=1
+    ).astype(np.float32)
+    dets = []
+    for k in batched_nms(boxes, score, cls_id, iou_thr, max_det):
+        x1, y1, x2, y2 = (float(v) for v in boxes[k])
+        # 레터박스를 되돌려 원본 영상 픽셀로 (parse_dx_detections와 같은 식)
+        dets.append(
+            Detection(
+                keep[int(cls_id[k])],
+                float(score[k]),
+                ((x1 - pad[0]) / scale, (y1 - pad[1]) / scale, (x2 - pad[0]) / scale, (y2 - pad[1]) / scale),
+            )
+        )
+    return dets
+
+
 def dx_seg_to_road_mask(
     seg_out: np.ndarray, out_hw: tuple[int, int], road_classes: Sequence[int], channels_first: bool = True
 ) -> np.ndarray:
@@ -396,19 +484,33 @@ def dx_seg_to_road_mask(
     - (1,C,H,W) 로짓: dx_engine이 출력을 NCHW로 돌려주므로(드론 모델로 확인) 기본은 채널 우선.
       NHWC로 나오는 모델이면 channels_first=False.
     - (1,H,W) 또는 (H,W): 이미 클래스 번호로 나온 출력으로 보고 그대로 쓴다.
-    실제 세그 .dxnn의 출력 모양은 아직 확인 필요.
+      DEEPX 공식 bisenetv2_1024x2048.dxnn은 장치 안에서 argmax까지 해서 (1, 1024, 2048) uint16
+      클래스 번호(Cityscapes 19 클래스, 0이 road)를 준다(2026-11-24 파이 실측).
     """
     seg = np.asarray(seg_out)
     if seg.ndim == 4 and seg.shape[0] == 1:
         seg = seg[0]  # 배치 축만 없앤다(채널이 1개여도 축을 지키려고 squeeze는 쓰지 않음)
     if seg.ndim == 3 and np.issubdtype(seg.dtype, np.integer) and seg.shape[0] == 1:
         seg = seg[0]  # (1,H,W) 정수 클래스 맵
-    if seg.ndim == 3:
-        cls = np.argmax(seg, axis=0 if channels_first else -1)
-    else:
-        cls = seg.astype(np.int32)
+    size = (out_hw[1], out_hw[0])
+    if seg.ndim == 2:
+        # ---- 클래스 번호 맵: 먼저 원본 크기로 줄이고(최근접) 그다음 비교한다 ----
+        # 1024x2048(200만 화소)에서 비교하면 파이5에서 수 ms가 더 든다. 최근접 축소는 클래스 번호를
+        # 섞지 않으므로 "비교 후 축소"와 결과가 같다. cv2.resize가 받는 자료형(uint8, uint16, int16,
+        # float32)이 아니면 int32 대신 float32로 바꿔 줄인다(클래스 번호는 작은 정수라 정확히 보존된다).
+        cls = seg
+        if cls.dtype not in (np.uint8, np.uint16, np.int16, np.float32):
+            cls = cls.astype(np.float32)
+        if cls.shape != (out_hw[0], out_hw[1]):
+            cls = cv2.resize(cls, size, interpolation=cv2.INTER_NEAREST)
+        rc = list(road_classes)
+        if len(rc) == 1:
+            return (cls == rc[0]).astype(np.uint8)
+        return np.isin(cls, rc).astype(np.uint8)
+    # ---- 로짓: 채널 축으로 argmax 뒤 비교, 그다음 원본 크기로 ----
+    cls = np.argmax(seg, axis=0 if channels_first else -1)
     mask = np.isin(cls, list(road_classes)).astype(np.uint8)
-    return cv2.resize(mask, (out_hw[1], out_hw[0]), interpolation=cv2.INTER_NEAREST)
+    return cv2.resize(mask, size, interpolation=cv2.INTER_NEAREST)
 
 
 # ---------------------------------------------------------------------------
@@ -593,12 +695,13 @@ class DXM1Backend:
     def infer(self, frames: Sequence[np.ndarray]) -> list[FrameResult]:
         if self.det is None:
             raise RuntimeError("검출 모델(dx_det_model)이 없어 infer()를 쓸 수 없습니다. segment()만 쓸 수 있습니다.")
-        if self.det.is_ppu:
-            # 장치 후처리(PPU) 모델은 출력이 이미 상자 목록이라 YOLO 원시 출력으로 읽으면 엉뚱한 값이 나온다
+        if self.det.is_ppu and self.det_format != "yolov8":
+            # PPU 출력 해석은 YOLOv8 PPU(중심, 폭, 높이가 픽셀로 나옴)만 확인했다. yolov5 PPU는
+            # 앵커와 격자 계산이 따로 필요하므로(dx_app YOLOv5PPUPostprocessor) 추측하지 않는다.
             desc = ", ".join(f"{n}{s}" for n, s in zip(self.det.output_names, self.det.output_shapes))
             raise ValueError(
-                f"PPU(장치 후처리) 모델이라 YOLO 원시 출력으로 해석할 수 없습니다: {desc}. "
-                "DXM1Backend.infer_raw()로 출력을 받아 PPU 형식에 맞는 해석을 더하세요."
+                f"PPU 모델은 dx_det_format: yolov8(YOLOv8 PPU)만 해석합니다: {desc}. "
+                "다른 PPU 모델은 DXM1Backend.infer_raw()로 출력을 받아 쓰세요."
             )
         tm = self.timer
         # ---- 전처리: BGR->RGB, 레터박스, 모델 입력 모양으로 ----
@@ -611,10 +714,17 @@ class DXM1Backend:
         with tm.stage("nms_parse"):
             results = []
             for o, (s, pad) in zip(outs, metas):
-                dets = parse_dx_detections(
-                    o, self.det.output_names, self.det.input_hw, s, pad,
-                    self.score_thr, self.iou_thr, self.det_format, self.labels, self.max_det,
-                )
+                if self.det.is_ppu:
+                    # 장치 후처리(PPU) 모델: 상자 구조체 목록(DeviceBoundingBox_t)을 읽고 CPU NMS
+                    dets = parse_dx_ppu_detections(
+                        o, s, pad, self.score_thr, self.iou_thr, self.labels, self.max_det
+                    )
+                else:
+                    # NMS 전 YOLO 원시 출력 (1, 84, 8400)
+                    dets = parse_dx_detections(
+                        o, self.det.output_names, self.det.input_hw, s, pad,
+                        self.score_thr, self.iou_thr, self.det_format, self.labels, self.max_det,
+                    )
                 results.append(FrameResult(detections=dets))
 
         if self.seg is not None:

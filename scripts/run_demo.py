@@ -236,6 +236,7 @@ def main() -> None:
         render_thread=args.render_thread,
         seg_backend=seg_backend,
         seg_every=int(npu.get("seg_every", 3)),
+        scale=float((cfg.get("scene") or {}).get("scale", 1.0)),  # 모형 설정은 scene.scale (없으면 실차 1.0)
     )
 
     # ---- 메인 루프 ----

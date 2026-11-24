@@ -17,6 +17,9 @@ from realityview.detectors import (
     letterbox,
     nms_numpy,
     parse_dx_detections,
+    parse_dx_ppu_detections,
+    ppu_boxes,
+    PPU_BBOX_DTYPE,
 )
 from realityview.pipeline import RealityViewPipeline
 from realityview.profiling import STAGE_LABEL_KO, STAGE_ORDER, StageTimer
@@ -288,16 +291,106 @@ def test_dxm1_backend_bgr_input_option(tmp_path):
     be.close()
 
 
-def test_dxm1_backend_rejects_ppu_model(tmp_path):
+# ---------------------------------------------------------------------------
+# 장치 후처리(PPU) 모델: DEEPX yolov8-s_640x640_ppu.dxnn에서 확인한 출력 형식
+#   (1, N, 32) uint8, 상자 없으면 (0, 0). 32바이트 = DeviceBoundingBox_t
+# ---------------------------------------------------------------------------
+def _ppu_raw(rows):
+    """rows: [(cx, cy, w, h, 점수, 라벨)] → 진짜 엔진처럼 (1, N, 32) uint8."""
+    if not rows:
+        return np.zeros((0, 0), np.uint8)
+    b = np.zeros(len(rows), PPU_BBOX_DTYPE)
+    for i, (cx, cy, w, h, sc, lb) in enumerate(rows):
+        b[i]["x"], b[i]["y"], b[i]["w"], b[i]["h"] = cx, cy, w, h
+        b[i]["score"], b[i]["label"] = sc, lb
+        b[i]["layer_idx"] = 1
+    return b.view(np.uint8).reshape(1, len(rows), 32)
+
+
+def test_ppu_struct_is_32_bytes_and_reads_fields():
+    raw = _ppu_raw([(100.0, 200.0, 40.0, 60.0, 0.9, 2)])
+    assert raw.shape == (1, 1, 32) and raw.dtype == np.uint8
+    b = ppu_boxes(raw)
+    assert b["x"][0] == 100.0 and b["h"][0] == 60.0 and b["label"][0] == 2
+    np.testing.assert_allclose(b["score"][0], 0.9, rtol=1e-6)
+    # 상자가 하나도 없을 때 진짜 엔진은 (0, 0) 배열을 준다
+    assert len(ppu_boxes(np.zeros((0, 0), np.uint8))) == 0
+    with pytest.raises(ValueError, match="32"):
+        ppu_boxes(np.zeros((1, 3, 6), np.float32))
+
+
+def test_parse_ppu_filters_nms_and_undoes_letterbox():
+    # 레터박스 배율 0.5, 패딩 (0, 80): 원본 (x - 0) / 0.5, (y - 80) / 0.5
+    rows = [
+        (100.0, 180.0, 40.0, 40.0, 0.9, 2),  # 차
+        (101.0, 181.0, 40.0, 40.0, 0.8, 2),  # 같은 차와 겹침: NMS로 빠진다
+        (100.0, 180.0, 40.0, 40.0, 0.7, 0),  # 같은 자리 사람: 다른 클래스라 남는다
+        (300.0, 300.0, 20.0, 20.0, 0.3, 2),  # 점수 미달
+        (400.0, 400.0, 20.0, 20.0, 0.9, 56),  # 의자: COCO_KEEP 밖
+    ]
+    dets = parse_dx_ppu_detections([_ppu_raw(rows)], 0.5, (0, 80), score_thr=0.4)
+    assert [d.label for d in dets] == ["car", "person"]
+    np.testing.assert_allclose(dets[0].box, (160, 160, 240, 240), atol=1e-4)
+    assert parse_dx_ppu_detections([_ppu_raw([])], 1.0, (0, 0), 0.4) == []
+    # labels를 주면 그 클래스만(번호 → 이름)
+    d2 = parse_dx_ppu_detections([_ppu_raw(rows)], 0.5, (0, 80), 0.4, labels={56: "chair"})
+    assert [d.label for d in d2] == ["chair"]
+
+
+def test_dxm1_backend_reads_ppu_model(tmp_path):
+    raw = _ppu_raw([(320.0, 320.0, 64.0, 32.0, 0.85, 2)])
     be = DXM1Backend(
         _touch(tmp_path, "ppu.dxnn"),
-        engine_factory=lambda p: FakeEngine(p, outputs=[("boxes", [1, 300, 6])], ppu=True),
+        engine_factory=lambda p: FakeEngine(p, outputs=[("BBOX", [8400])], ppu=True, out_fn=lambda x: [raw.copy()]),
+    )
+    f = np.zeros((640, 640, 3), np.uint8)  # 레터박스가 없는 크기라 좌표가 그대로
+    res = be.infer([f, f])
+    assert [len(r.detections) for r in res] == [1, 1]
+    np.testing.assert_allclose(res[0].detections[0].box, (288, 304, 352, 336), atol=1e-4)
+    be.close()
+
+
+def test_dxm1_backend_rejects_yolov5_ppu_model(tmp_path):
+    be = DXM1Backend(
+        _touch(tmp_path, "ppu.dxnn"),
+        engine_factory=lambda p: FakeEngine(p, outputs=[("BBOX", [8400])], ppu=True,
+                                            out_fn=lambda x: [np.zeros((0, 0), np.uint8)]),
+        det_format="yolov5",
     )
     frames = [np.zeros((432, 768, 3), np.uint8)]
-    with pytest.raises(ValueError, match=r"PPU.*boxes\[1, 300, 6\].*infer_raw"):
+    with pytest.raises(ValueError, match=r"PPU.*BBOX\[8400\].*infer_raw"):
         be.infer(frames)
-    assert be.infer_raw(frames)[0][0].shape == (1, 300, 6)  # 원시 출력은 그대로 받을 수 있다
+    assert be.infer_raw(frames)[0][0].shape == (0, 0)  # 원시 출력은 그대로 받을 수 있다
     be.close()
+
+
+def test_decode_keeps_probabilities_with_tiny_negative_values():
+    # DEEPX yolov8-s_640x640.dxnn 실측: 확률 출력인데 최솟값이 -1.2e-7. 시그모이드를 또 씌우면
+    # 점수 0인 앵커 8400개가 모두 0.5가 되어 문턱값 0.4를 넘는다.
+    raw = _raw_with_boxes([(10, 100, 100, 50, 50, 2, 0.9)])
+    raw[0, 4 + 5, 20] = -1.1920929e-07
+    rows = decode_yolo_raw(raw, (640, 640), 0.4)
+    assert len(rows) == 1 and rows[0][0] == 2
+    np.testing.assert_allclose(rows[0][1], 0.9, rtol=1e-6)
+
+
+def test_dx_seg_uint16_classmap_like_bisenetv2():
+    # BiSeNetV2 실측 출력: (1, 1024, 2048) uint16 클래스 번호. 줄인 뒤 비교해도 결과가 같아야 한다
+    rng = np.random.default_rng(0)
+    seg = rng.integers(0, 19, size=(1, 1024, 2048)).astype(np.uint16)
+    seg[0, :512] = 0  # 위쪽 절반은 도로
+    m = dx_seg_to_road_mask(seg, (432, 768), [0])
+    assert m.shape == (432, 768) and m.dtype == np.uint8
+    import cv2
+
+    ref = cv2.resize(np.isin(seg[0].astype(np.int32), [0]).astype(np.uint8), (768, 432), interpolation=cv2.INTER_NEAREST)
+    np.testing.assert_array_equal(m, ref)
+    m2 = dx_seg_to_road_mask(seg, (432, 768), [0, 1])
+    ref2 = cv2.resize(np.isin(seg[0].astype(np.int32), [0, 1]).astype(np.uint8), (768, 432), interpolation=cv2.INTER_NEAREST)
+    np.testing.assert_array_equal(m2, ref2)
+    # int64 클래스 맵(cv2.resize가 못 받는 자료형)도 같은 결과
+    m3 = dx_seg_to_road_mask(seg.astype(np.int64), (432, 768), [0])
+    np.testing.assert_array_equal(m3, ref)
 
 
 def _seg_factory(hw=(64, 128), nc=19):
@@ -475,13 +568,20 @@ def test_run_demo_seg_npu_without_model_explains(monkeypatch, capsys):
     assert "dx_seg_model" in str(e.value) and "models/" in str(e.value)
 
 
-@pytest.mark.parametrize("cfg", ["two_cam.yaml", "two_cam_current.yaml", "four_cam.yaml"])
+@pytest.mark.parametrize("cfg", ["two_cam.yaml", "two_cam_current.yaml", "four_cam.yaml", "two_cam_model.yaml"])
 def test_configs_have_dxm1_keys(cfg):
     _, _, c = load_config(os.path.join(ROOT, "configs", cfg))
     npu = c["npu"]
     assert npu["dx_det_model"].startswith("models/") and npu["dx_det_model"].endswith(".dxnn")
-    assert npu["dx_det_format"] in ("yolov8", "yolov5") and npu["dx_seg_model"] is None
+    assert npu["dx_det_format"] in ("yolov8", "yolov5")
     assert npu["dx_seg_channels_first"] is True
+    if cfg in ("two_cam_current.yaml", "two_cam_model.yaml"):
+        # 지금 달린 카메라 설정은 DEEPX 공식 모델 저장소에서 받은 실제 모델을 가리킨다
+        assert npu["dx_det_model"] == "models/dxnn/yolov8-s_640x640_ppu.dxnn"
+        assert npu["dx_seg_model"] == "models/dxnn/bisenetv2_1024x2048.dxnn"
+        assert npu["road_classes"] == [0]  # Cityscapes road
+    else:
+        assert npu["dx_seg_model"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -509,9 +609,49 @@ def test_real_dx_model_raw_outputs():
         raw = be.infer_raw(frames, "det")
         assert len(raw) == 2
         for outs in raw:
-            assert [list(o.shape) for o in outs] == be.det.output_shapes
+            if be.det.is_ppu:
+                # PPU 모델은 정보가 [8400]이라고 해도 실제로는 (1, N, 32) uint8 또는 (0, 0)을 준다
+                assert outs[0].dtype == np.uint8 and (outs[0].size == 0 or outs[0].shape[-1] == 32)
+            else:
+                assert [list(o.shape) for o in outs] == be.det.output_shapes
         if len(be.det.output_names) > 1:
             with pytest.raises(ValueError, match="infer_raw"):
                 be.infer(frames)
+    finally:
+        be.close()
+
+
+# 파이에 DEEPX 공식 모델이 있으면(models/dxnn/) 실제 모델로 검출과 세그를 한 번씩 돌린다
+_DXNN = os.path.join(ROOT, "models", "dxnn")
+
+
+@pytest.mark.skipif(not os.path.isfile(os.path.join(_DXNN, "yolov8-s_640x640_ppu.dxnn")), reason="models/dxnn에 PPU 모델이 없으면 건너뜀")
+def test_real_ppu_and_raw_models_agree():
+    pytest.importorskip("dx_engine")
+    from realityview.types import COCO_ALL
+
+    rng = np.random.default_rng(1)
+    black = np.zeros((432, 768, 3), np.uint8)
+    for name in ("yolov8-s_640x640_ppu.dxnn", "yolov8-s_640x640.dxnn"):
+        path = os.path.join(_DXNN, name)
+        if not os.path.isfile(path):
+            continue
+        be = DXM1Backend(path, labels=COCO_ALL, score_thr=0.25)
+        try:
+            res = be.infer([black, rng.integers(0, 255, (576, 768, 3), dtype=np.uint8)])
+            assert len(res) == 2 and res[0].detections == []  # 검은 영상은 상자 0개(PPU는 (0, 0) 출력)
+        finally:
+            be.close()
+
+
+@pytest.mark.skipif(not os.path.isfile(os.path.join(_DXNN, "bisenetv2_1024x2048.dxnn")), reason="models/dxnn에 BiSeNetV2가 없으면 건너뜀")
+def test_real_bisenetv2_segment_shape():
+    pytest.importorskip("dx_engine")
+    be = DXM1Backend(None, os.path.join(_DXNN, "bisenetv2_1024x2048.dxnn"))
+    try:
+        frames = [np.zeros((576, 768, 3), np.uint8), np.zeros((432, 768, 3), np.uint8)]
+        masks = be.segment(frames)
+        assert [m.shape for m in masks] == [(576, 768), (432, 768)]
+        assert all(m.dtype == np.uint8 and m.max() <= 1 for m in masks)
     finally:
         be.close()

@@ -18,18 +18,23 @@ class Track:
     hits: int = 1
     misses: int = 0
     score: float = 0.0
+    min_speed: float = 0.8  # 이 속도(m/s) 이상일 때만 진행 방향을 믿는다. 모형이면 축척만큼 작게
 
     @property
     def heading(self) -> float | None:
         """속도가 충분하면 진행 방향(rad, 차량 X축 기준), 아니면 None."""
-        if np.linalg.norm(self.vel) < 0.8:
+        if np.linalg.norm(self.vel) < self.min_speed:
             return None
         return float(np.arctan2(self.vel[1], self.vel[0]))
 
 
 class BevTracker:
-    def __init__(self, gate: float = 2.5, max_misses: int = 5, min_hits: int = 2, alpha: float = 0.5):
-        self.gate = gate
+    def __init__(
+        self, gate: float = 2.5, max_misses: int = 5, min_hits: int = 2, alpha: float = 0.5, scale: float = 1.0
+    ):
+        # scale: 장면 축척. 모형(예: 0.15)이면 짝짓기 거리(gate)와 방향 판단 속도를 같은 비율로 줄인다
+        self.scale = scale
+        self.gate = gate * scale
         self.max_misses = max_misses
         self.min_hits = min_hits
         self.alpha = alpha
@@ -67,7 +72,9 @@ class BevTracker:
                 t.misses += 1
         for oi, o in enumerate(objs):
             if oi not in used_o:
-                self.tracks.append(Track(self._next_id, o.label, o.xy.copy(), size=o.size, score=o.score))
+                self.tracks.append(
+                    Track(self._next_id, o.label, o.xy.copy(), size=o.size, score=o.score, min_speed=0.8 * self.scale)
+                )
                 self._next_id += 1
         self.tracks = [t for t in self.tracks if t.misses <= self.max_misses]
         # 화면에는 확정되었고 최근에 다시 관측된 트랙만 보낸다(가려진 직후 1프레임은 유지)

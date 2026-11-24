@@ -115,8 +115,11 @@ def render_bev(
     road_mask: np.ndarray | None = None,
     coverage: np.ndarray | None = None,
     show_ids: bool = True,
+    scale: float = 1.0,
 ) -> np.ndarray:
     """탑뷰 한 장을 새로 그린다.
+
+    scale: 장면 축척. 모형이면 자차 크기, 보행자 점 크기, 거리 고리 간격을 같은 비율로 줄인다.
 
     ground_img: IPM으로 합성한 바닥 영상(BGR). 어둡고 차갑게 바꿔 깐다
     road_mask: 탑뷰 크기의 도로 마스크(0이 아니면 도로). 도로색을 반쯤 섞는다
@@ -145,8 +148,9 @@ def render_bev(
         blend_where(canvas, m, ROAD, 0.5)
 
     # ---- 3) 거리 고리, 자차 ----
-    _draw_rings(canvas, grid)
-    _draw_box(canvas, grid, np.array([EGO_SIZE[0] / 2 - EGO_REAR_OFFSET, 0.0]), EGO_SIZE, 0.0, EGO, fill=True)
+    _draw_rings(canvas, grid, scale)
+    ego = (EGO_SIZE[0] * scale, EGO_SIZE[1] * scale)
+    _draw_box(canvas, grid, np.array([ego[0] / 2 - EGO_REAR_OFFSET * scale, 0.0]), ego, 0.0, EGO, fill=True)
 
     # ---- 4) 트랙: 먼 것부터 그려서 가까운 것이 위에 오게 ----
     for t in sorted(tracks, key=lambda t: -np.linalg.norm(t.xy)):
@@ -156,7 +160,7 @@ def render_bev(
         yaw = 0.0
         if t.label in ("person",):
             c = grid.to_pixel(t.xy[None])[0]
-            r = max(3, int(0.35 / grid.res))
+            r = max(3, int(0.35 * scale / grid.res))
             cv2.circle(canvas, (int(c[0]), int(c[1])), r, color, -1, cv2.LINE_AA)
         else:
             _draw_box(canvas, grid, t.xy, t.size, yaw, color, fill=True)
@@ -169,12 +173,14 @@ def render_bev(
     return canvas
 
 
-def _draw_rings(canvas: np.ndarray, grid: BevGrid) -> None:
+def _draw_rings(canvas: np.ndarray, grid: BevGrid, scale: float = 1.0) -> None:
+    """자차 기준 거리 고리. 실차는 5, 10, 15, 20m, 모형은 같은 고리를 축척만큼 줄여 그린다."""
     c = grid.to_pixel(np.array([[0.0, 0.0]]))[0].astype(int)
-    for r_m in (5, 10, 15, 20):
+    for base in (5, 10, 15, 20):
+        r_m = base * scale
         cv2.circle(canvas, tuple(c), int(r_m / grid.res), (60, 56, 52), 1, cv2.LINE_AA)
         cv2.putText(
-            canvas, f"{r_m}m", (c[0] + 4, c[1] - int(r_m / grid.res) + 12), cv2.FONT_HERSHEY_SIMPLEX, 0.35,
+            canvas, f"{r_m:g}m", (c[0] + 4, c[1] - int(r_m / grid.res) + 12), cv2.FONT_HERSHEY_SIMPLEX, 0.35,
             (110, 105, 100), 1, cv2.LINE_AA,
         )
 
