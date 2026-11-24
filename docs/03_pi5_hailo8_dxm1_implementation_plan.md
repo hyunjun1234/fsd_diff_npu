@@ -6,15 +6,13 @@
 
 ## 1. 한눈에 보는 결론
 
-| 항목 | 계획 |
-|---|---|
-| 연결 | 파이5의 PCIe 1레인에 Seeed PCIe 3.0 to Dual M.2 HAT(103110065)를 달고 Hailo-8 M.2 모듈과 DX-M1(4GB) 모듈을 함께 꽂습니다. 저장장치는 SD 카드나 USB SSD를 씁니다. |
-| 카메라 | 처음에는 Camera Module 3 Wide 2대(전방, 후방)로 시작하고, 이후 동기화 쿼드 카메라 키트로 4대(전후좌우)까지 늘립니다. |
-| Hailo-8 역할 | 카메라별 객체 검출(YOLOv8s HEF). 기존 데모 코드가 이미 이 구성을 전제로 짜여 있습니다. |
-| DX-M1 역할 | 도로 세그멘테이션과 거리 보정용 깊이 추정. 2단계에서는 FlashOcc의 이미지 백본을 맡습니다. 온보드 메모리가 있어 큰 모델을 올리기 유리합니다. |
-| CPU 역할 | 지면 투영(IPM), 카메라 간 병합과 추적, BEV 변환(BEVPool), 화면 렌더링 |
-| 구현 순서 | 0단계 장비 확인, 1단계 Hailo 단독 실기 검증, 2단계 DX-M1 추가, 3단계 카메라 4대, 4단계 FlashOcc 분할 실행, 5단계 자체 데이터 미세조정 순서입니다. |
-| 생성형 렌더러 | 테슬라 v15 방식(약 1B 생성 모델)은 이 세 장비로는 범위 밖으로 두고, 마지막에 가능성만 따로 시험합니다. 이유는 02 문서 3장에 있습니다. |
+- 연결: 파이5의 PCIe 1레인에 Seeed PCIe 3.0 to Dual M.2 HAT(103110065)를 달고 Hailo-8 M.2 모듈과 DX-M1(4GB) 모듈을 함께 꽂습니다. 저장장치는 SD 카드나 USB SSD를 씁니다.
+- 카메라: 처음에는 Camera Module 3 Wide 2대(전방, 후방)로 시작하고, 이후 동기화 쿼드 카메라 키트로 4대(전후좌우)까지 늘립니다.
+- Hailo-8: 카메라별 객체 검출(YOLOv8s HEF)을 맡습니다. 기존 데모 코드가 이미 이 구성에 맞춰 짜여 있습니다.
+- DX-M1: 도로 세그멘테이션과 거리 보정용 깊이 추정을 맡습니다. 2단계에서는 FlashOcc의 이미지 백본을 맡습니다. 온보드 메모리가 있어 큰 모델을 올리기 유리합니다.
+- CPU: 지면 투영(IPM), 카메라 간 병합과 추적, BEV 변환(BEVPool), 화면 렌더링을 맡습니다.
+- 구현 순서: 0단계 장비 확인, 1단계 Hailo 단독 실기 검증, 2단계 DX-M1 추가, 3단계 카메라 4대, 4단계 FlashOcc 분할 실행, 5단계 자체 데이터 미세조정 순서입니다.
+- 생성형 렌더러: 테슬라 v15 방식(약 1B 생성 모델)은 이 세 장비로는 범위 밖으로 두고, 마지막에 가능성만 따로 시험합니다. 이유는 02 문서 3장에 있습니다.
 
 ## 2. 하드웨어 구성
 
@@ -34,10 +32,14 @@ DX-M1은 4GB 메모리 모듈을 씁니다. 3장에서 세그멘테이션, 깊�
 
 ### 2.3 카메라 수와 배치
 
-| 구성 | 카메라 | 연결 | 덮는 범위 | 쓰는 단계 |
-|---|---|---|---|---|
-| 2대 | Camera Module 3 Wide 2대 (수평 102도, 수직 67도, 1080p50) [P5] | CSI0 전방, CSI1 후방 | 앞뒤 약 102도씩, 좌우 측면은 사각지대 | 0~2단계 |
-| 4대 | Arducam 12MP IMX708 쿼드 카메라 키트 (카메라당 수평 100도) [P6] | 4대를 2x2로 합친 한 프레임을 CSI 하나로 받음 | 100도 x 4 = 400도로 360도를 덮고 모서리에서 조금 겹침 | 3단계 이후 |
+| 구성 | 카메라 | 수평 화각 | 쓰는 단계 |
+|---|---|---|---|
+| 2대 | Camera Module 3 Wide | 102도 | 0~2단계 |
+| 4대 | Arducam IMX708 쿼드 키트 | 카메라당 100도 | 3단계 이후 |
+
+2대 구성은 Camera Module 3 Wide(수평 102도, 수직 67도, 1080p50 [P5])를 CSI0에 전방, CSI1에 후방으로 연결합니다. 앞뒤를 약 102도씩 덮고 좌우 측면은 사각지대로 남습니다.
+
+4대 구성은 Arducam 12MP IMX708 쿼드 카메라 키트 [P6]를 씁니다. 4대를 2x2로 합친 한 프레임을 CSI 하나로 받습니다. 100도씩 4대, 합계 400도로 360도를 덮고 모서리에서 조금 겹칩니다.
 
 카메라 위치와 각도는 [configs/two_cam.yaml](../configs/two_cam.yaml)과 [configs/four_cam.yaml](../configs/four_cam.yaml)의 값을 출발점으로 씁니다. 차량 좌표는 X가 전방, Y가 좌측이고 원점은 뒷바퀴 축 중앙 바닥입니다. 4대 구성에서 전방은 1.3m 높이에서 12도, 후방은 1.1m 높이에서 15도, 좌우는 사이드미러 위치(1.05m)에서 30도 아래로 숙입니다. 좌우 카메라를 많이 숙이는 이유는 지면 투영 방식에서 차 바로 옆 바닥이 잘 보여야 거리 오차가 줄기 때문입니다. 테슬라는 카메라 7~8대를 쓰며(01 문서 6장), 이 계획의 4대는 그중 전방 와이드, 후방, 좌우 리피터 위치를 대신하는 최소 구성입니다.
 
@@ -69,12 +71,20 @@ Hailo-8은 라즈베리파이용 모델 주와 데모 코드가 이미 맞춰져
 
 ### 3.2 단계별 배치표
 
-| 단계 | Hailo-8 | DX-M1 | CPU |
-|---|---|---|---|
-| 1단계 | YOLOv8s 검출(Model Zoo HEF, NMS 내장), 도로 세그 HEF 선택 | 사용 안 함 | IPM 합성, 접지점 변환, 병합, 추적, 렌더링 |
-| 2단계 | YOLOv8s 검출, 카메라 전체를 배치로 매 프레임 | 도로 세그(N프레임마다), 이후 단안 깊이로 거리 보정 | 위와 같음, 두 NPU 결과 시간 맞추기 |
-| 3단계 | 위와 같음, 카메라 4대 | 위와 같음, 카메라 4대 | 쿼드 프레임 분할, 4대 IPM |
-| 4단계 | FlashOcc 뒷부분(BEV 인코더와 occupancy 헤드) | FlashOcc 앞부분(이미지 백본과 깊이 헤드) | BEVPool, channel-to-height reshape, occupancy 렌더링 |
+| 단계 | Hailo-8 | DX-M1 |
+|---|---|---|
+| 1단계 | YOLOv8s 검출 | 사용 안 함 |
+| 2단계 | YOLOv8s 검출 | 도로 세그, 단안 깊이 |
+| 3단계 | 2단계와 같음 | 2단계와 같음 |
+| 4단계 | FlashOcc 뒷부분 | FlashOcc 앞부분 |
+
+1단계에서 Hailo-8은 Model Zoo의 YOLOv8s HEF(NMS 내장)로 검출하고, 도로 세그 HEF는 선택입니다. CPU는 IPM 합성, 접지점 변환, 병합, 추적, 렌더링을 맡습니다.
+
+2단계에서 Hailo-8은 카메라 전체를 배치로 묶어 매 프레임 검출합니다. DX-M1은 도로 세그를 N프레임마다 돌리고, 이후 단안 깊이로 거리를 보정합니다. CPU는 1단계의 일에 더해 두 NPU 결과의 시간을 맞춥니다.
+
+3단계는 2단계와 같은 배치를 카메라 4대로 늘립니다. CPU는 쿼드 프레임을 나누고 4대의 IPM을 처리합니다.
+
+4단계에서 Hailo-8은 FlashOcc 뒷부분(BEV 인코더와 occupancy 헤드)을, DX-M1은 앞부분(이미지 백본과 깊이 헤드)을 맡습니다. CPU는 BEVPool, channel-to-height reshape, occupancy 렌더링을 맡습니다.
 
 DX-M1용 모델은 Ultralytics에서 바로 만들 수 있습니다. `model.export(format="deepx")`로 .dxnn 파일이 나오고, 검출, 세그멘테이션, 시맨틱 세그멘테이션, 깊이 추정을 지원합니다. 시맨틱 세그멘테이션과 깊이는 YOLO26에서만 됩니다. 내보내기는 x86-64 리눅스에서만 되고 파이5에서는 실행만 합니다. INT8만 지원하며 보정 이미지는 실제 장착 카메라 영상과 비슷한 것을 넣어야 합니다 [P7]. 같은 문서에 파이5와 DX-M1에서 YOLO26n 검출 34.6ms, YOLO26n-seg 53.8ms(전후처리 제외)로 나와 있습니다 [P7].
 
@@ -141,14 +151,12 @@ nuScenes와 카메라 높이, 화각이 다르면 성능이 크게 떨어지므�
 
 ## 5. 위험 요소와 대응
 
-| 위험 | 영향 | 대응 |
-|---|---|---|
-| 듀얼 M.2 HAT에서 한 NPU가 인식되지 않음 | 두 NPU 동시 사용 불가 | 보조 전원 연결, PCIe Gen2로 낮춰 시험, 안 되면 파이 두 대에 NPU를 하나씩 달고 결과만 이더넷으로 주고받기 |
-| DX-RT 드라이버가 Raspberry Pi OS에서 빌드되지 않음 | DX-M1 사용 불가 | Ubuntu for Raspberry Pi 설치, Radxa 문서 절차 따르기 |
-| 쿼드 키트가 파이5에서 동작하지 않음 | 4대 구성 지연 | CSI 2대 + USB 2대, 타임스탬프 기반 묶음 |
-| 파이5 CPU가 BEV 합성과 렌더링을 못 따라감 | FPS 목표 미달 | BEV 해상도 낮추기, 렌더링 스레드 분리, 핵심 루프 C 확장 |
-| 지면 평면 가정 오차 | 원거리, 경사로 거리 오차 | 2단계 깊이 보정, 4단계 occupancy |
-| FlashOcc INT8 정확도 하락 | 4단계 결과 품질 저하 | 혼합 정밀도 가능 레이어 확인, 보정 데이터 늘리기 |
+- 듀얼 M.2 HAT에서 한 NPU가 인식되지 않으면 두 NPU를 함께 쓸 수 없습니다. 보조 전원을 연결하고 PCIe Gen2로 낮춰 시험합니다. 그래도 안 되면 파이 두 대에 NPU를 하나씩 달고 결과만 이더넷으로 주고받습니다.
+- DX-RT 드라이버가 Raspberry Pi OS에서 빌드되지 않으면 DX-M1을 쓸 수 없습니다. Ubuntu for Raspberry Pi를 설치하고 Radxa 문서의 절차를 따릅니다.
+- 쿼드 키트가 파이5에서 동작하지 않으면 4대 구성이 늦어집니다. CSI 2대와 USB 2대를 섞고 타임스탬프로 프레임을 묶습니다.
+- 파이5 CPU가 BEV 합성과 렌더링을 못 따라가면 FPS 목표에 못 미칩니다. BEV 해상도를 낮추고, 렌더링 스레드를 분리하고, 핵심 루프를 C 확장으로 옮깁니다.
+- 지면 평면 가정 때문에 먼 거리와 경사로에서 거리 오차가 생깁니다. 2단계의 깊이 보정과 4단계의 occupancy로 줄입니다.
+- FlashOcc의 INT8 정확도가 떨어지면 4단계 결과의 품질이 나빠집니다. 혼합 정밀도를 쓸 수 있는 레이어를 확인하고 보정 데이터를 늘립니다.
 
 ## 6. 시작 전에 정해야 할 것
 
@@ -156,13 +164,11 @@ nuScenes와 카메라 높이, 화각이 다르면 성능이 크게 떨어지므�
 
 ## 참고 자료
 
-| 번호 | 출처 |
-|---|---|
-| P1 | CNX Software, "PCIe3.0 to Dual M.2 HAT+ for Raspberry Pi 5 features ASMedia ASM2806 PCIe 3.0 switch": https://www.cnx-software.com/2025/01/21/pcie3-0-to-dual-m-2-hat-for-raspberry-pi-5-features-asmedia-asm2806-pcie-3-0-switch/ |
-| P2 | Seeed Studio Wiki, "Raspberry Pi 5 uses PCIe HAT / dual HAT": https://wiki.seeedstudio.com/raspberry_pi_5_uses_pcie_hat_dual_hat/ |
-| P3 | Hailo Community, "Raspberry Pi PCIe to 4ch PCIe": https://community.hailo.ai/t/raspberry-pi-pcie-to-4ch-pcie/19020/3 |
-| P4 | Hailo Community, "Hailo M.2 not detected alongside M.2 SSD on Raspberry Pi5": https://community.hailo.ai/t/hailo-m-2-not-detected-alongside-m-2-ssd-on-raspberry-pi5/17759 |
-| P5 | Raspberry Pi, Camera Module 3 제품 페이지와 제품 설명서: https://www.raspberrypi.com/products/camera-module-3/ , https://datasheets.raspberrypi.com/camera/camera-module-3-product-brief.pdf |
-| P6 | Arducam, "12MP IMX708 Quad-Camera Kit": https://www.arducam.com/arducam-12mp-imx708-quad-camera-kit-wide-angle-stereo-synchronized-camera-module-for-raspberry-pi.html |
-| P7 | Ultralytics Docs, "DEEPX integration": https://docs.ultralytics.com/integrations/deepx |
-| P8 | DEEPX Developer, "DX-RT Installation on Linux": https://developer.deepx.ai/tech-docs/DXNN-SDK/DX-RT/Installation_on_Linux , https://pypi.org/project/dx-engine/ |
+- P1: CNX Software, "PCIe3.0 to Dual M.2 HAT+ for Raspberry Pi 5 features ASMedia ASM2806 PCIe 3.0 switch": https://www.cnx-software.com/2025/01/21/pcie3-0-to-dual-m-2-hat-for-raspberry-pi-5-features-asmedia-asm2806-pcie-3-0-switch/
+- P2: Seeed Studio Wiki, "Raspberry Pi 5 uses PCIe HAT / dual HAT": https://wiki.seeedstudio.com/raspberry_pi_5_uses_pcie_hat_dual_hat/
+- P3: Hailo Community, "Raspberry Pi PCIe to 4ch PCIe": https://community.hailo.ai/t/raspberry-pi-pcie-to-4ch-pcie/19020/3
+- P4: Hailo Community, "Hailo M.2 not detected alongside M.2 SSD on Raspberry Pi5": https://community.hailo.ai/t/hailo-m-2-not-detected-alongside-m-2-ssd-on-raspberry-pi5/17759
+- P5: Raspberry Pi, Camera Module 3 제품 페이지와 제품 설명서: https://www.raspberrypi.com/products/camera-module-3/ , https://datasheets.raspberrypi.com/camera/camera-module-3-product-brief.pdf
+- P6: Arducam, "12MP IMX708 Quad-Camera Kit": https://www.arducam.com/arducam-12mp-imx708-quad-camera-kit-wide-angle-stereo-synchronized-camera-module-for-raspberry-pi.html
+- P7: Ultralytics Docs, "DEEPX integration": https://docs.ultralytics.com/integrations/deepx
+- P8: DEEPX Developer, "DX-RT Installation on Linux": https://developer.deepx.ai/tech-docs/DXNN-SDK/DX-RT/Installation_on_Linux , https://pypi.org/project/dx-engine/

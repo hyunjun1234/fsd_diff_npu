@@ -8,16 +8,27 @@
 
 크레딧은 사람이 손으로 하면 오래 걸리지만 NPU에서 돌릴 필요는 없는 일에 씁니다. 파이5 위에서 실시간으로 도는 경로(검출, 세그, BEV 합성, 렌더링)에는 넣지 않습니다. 오프라인으로 PC에서 돌리고 결과만 저장소의 데이터나 기록으로 남깁니다.
 
-| 용도 | 쓰는 방식 | 구현 계획에서 쓰이는 곳 | 하는 일 |
-|---|---|---|---|
-| 자체 영상 검수와 태깅 | Batch API | 2단계 검출 비교, 3단계 INT8 보정 이미지 고르기, 5단계 의사 라벨 걸러내기 | 카메라 프레임과 NPU 검출 결과를 함께 보내 놓친 물체, 잘못 잡은 물체를 표시하고 장면 조건(밝기, 역광, 비, 경사로, 주차장 등)을 태그로 붙입니다. 사람은 표시된 프레임만 다시 봅니다. |
-| 결과 화면 비교 판정 | Batch API | 3단계 "한 바퀴 도는 사람이 같은 ID로 추적되는지", 4단계 "occupancy와 지면 투영 결과를 나란히 놓고 확인" | 카메라 영상과 BEV 화면을 한 장으로 붙여 보내고, 두 결과가 크게 어긋나는 프레임을 골라 이유를 적게 합니다. |
-| 컴파일과 실행 로그 분석 | API | 0단계 드라이버 설치, 2단계 이후 실행 오류 | Hailo DFC, DX-COM 컴파일 로그나 `dmesg`를 넣고 지원되지 않은 연산자와 그 위치, 바꿀 수 있는 대체 연산을 정리하게 합니다. |
-| 자료 읽기 | API | 4단계 FlashOcc 경량화, DX-RT와 HailoRT 문서 | 논문과 SDK PDF를 넣고 필요한 부분(입력 크기, BEVPool 구현, 양자화 옵션)을 찾아 묻습니다. |
-| 연산자 확인 자동 반복 | Agent SDK (PC에서 실행) | 4.5절 연산자 확인 | 에이전트가 최소 ONNX 모델을 만들고, PC에 설치된 Hailo DFC와 DX-COM으로 컴파일하고, 로그를 읽고, 실패한 연산을 바꿔 다시 컴파일하는 일을 반복한 뒤 모델 선정 문서 3장 표에 들어갈 결과를 정리합니다. |
-| ONNX 분할과 BEVPool 시험 | 관리형 에이전트 | 4단계 FlashOcc 분할 실행 | Anthropic이 운영하는 샌드박스에 FlashOcc 코드를 받아 CPU만으로 ResNet18 구성의 ONNX를 앞뒤로 나눠 내보내고, BEVPool NumPy 구현이 원래 결과와 같은지 무작위 입력으로 확인합니다. 학습은 하지 않습니다. |
-| NPU 소프트웨어 변경 확인 | 관리형 에이전트 (주기 실행) | 문서의 "확인 필요" 항목 | 주 1회 Hailo, DEEPX, Ultralytics의 릴리스 노트를 웹 검색으로 읽고, 연산자 지원이나 Raspberry Pi OS 지원이 바뀌었으면 요약을 남깁니다. |
-| 프롬프트 다듬기 | Playground | 위 Batch 작업 전체 | 프레임 몇 장으로 프롬프트와 모델, effort를 고른 뒤 코드로 옮깁니다. |
+| 용도 | 쓰는 방식 |
+|---|---|
+| 자체 영상 검수와 태깅 | Batch API |
+| 결과 화면 비교 판정 | Batch API |
+| 컴파일과 실행 로그 분석 | API |
+| 자료 읽기 | API |
+| 연산자 확인 자동 반복 | Agent SDK |
+| ONNX 분할과 BEVPool 시험 | 관리형 에이전트 |
+| NPU 소프트웨어 변경 확인 | 관리형 에이전트 |
+| 프롬프트 다듬기 | Playground |
+
+용도별로 구현 계획의 어디에 쓰이고 무엇을 하는지는 다음과 같습니다.
+
+- 자체 영상 검수와 태깅: 2단계 검출 비교, 3단계 INT8 보정 이미지 고르기, 5단계 의사 라벨 걸러내기에 씁니다. 카메라 프레임과 NPU 검출 결과를 함께 보내 놓친 물체, 잘못 잡은 물체를 표시하고 장면 조건(밝기, 역광, 비, 경사로, 주차장 등)을 태그로 붙입니다. 사람은 표시된 프레임만 다시 봅니다.
+- 결과 화면 비교 판정: 3단계의 "한 바퀴 도는 사람이 같은 ID로 추적되는지"와 4단계의 "occupancy와 지면 투영 결과를 나란히 놓고 확인"에 씁니다. 카메라 영상과 BEV 화면을 한 장으로 붙여 보내고, 두 결과가 크게 어긋나는 프레임을 골라 이유를 적게 합니다.
+- 컴파일과 실행 로그 분석: 0단계 드라이버 설치와 2단계 이후의 실행 오류에 씁니다. Hailo DFC, DX-COM 컴파일 로그나 `dmesg`를 넣고 지원되지 않은 연산자와 그 위치, 바꿀 수 있는 대체 연산을 정리하게 합니다.
+- 자료 읽기: 4단계 FlashOcc 경량화와 DX-RT, HailoRT 문서에 씁니다. 논문과 SDK PDF를 넣고 필요한 부분(입력 크기, BEVPool 구현, 양자화 옵션)을 찾아 묻습니다.
+- 연산자 확인 자동 반복: 4.5절 연산자 확인에 쓰며 PC에서 실행합니다. 에이전트가 최소 ONNX 모델을 만들고, PC에 설치된 Hailo DFC와 DX-COM으로 컴파일하고, 로그를 읽고, 실패한 연산을 바꿔 다시 컴파일하는 일을 반복한 뒤 모델 선정 문서 3장 표에 들어갈 결과를 정리합니다.
+- ONNX 분할과 BEVPool 시험: 4단계 FlashOcc 분할 실행에 씁니다. Anthropic이 운영하는 샌드박스에 FlashOcc 코드를 받아 CPU만으로 ResNet18 구성의 ONNX를 앞뒤로 나눠 내보내고, BEVPool NumPy 구현이 원래 결과와 같은지 무작위 입력으로 확인합니다. 학습은 하지 않습니다.
+- NPU 소프트웨어 변경 확인: 문서의 "확인 필요" 항목에 쓰며 주기적으로 실행합니다. 주 1회 Hailo, DEEPX, Ultralytics의 릴리스 노트를 웹 검색으로 읽고, 연산자 지원이나 Raspberry Pi OS 지원이 바뀌었으면 요약을 남깁니다.
+- 프롬프트 다듬기: 위 Batch 작업 전체에 씁니다. 프레임 몇 장으로 프롬프트와 모델, effort를 고른 뒤 코드로 옮깁니다.
 
 연산자 확인을 Agent SDK로 PC에서 돌리는 이유는 Hailo DFC와 DX-COM이 PC에 설치된 컴파일러여서 에이전트가 그 자리에서 직접 실행해야 하기 때문입니다. 관리형 에이전트는 Anthropic 쪽 샌드박스에서 돌기 때문에 이 컴파일러가 필요 없는 일만 맡깁니다.
 
@@ -27,11 +38,17 @@
 
 가격은 Anthropic 공식 가격표 기준이며 100만 토큰당 달러입니다 [C1]. Batch API로 보내면 입력과 출력 모두 반값이고, 대부분 1시간 안에 끝나며 24시간 안에 끝나지 않은 요청은 청구되지 않습니다 [C1][C2].
 
-| 모델 | 모델 ID | 입력 | 출력 | Batch 입력 | Batch 출력 | 이 프로젝트에서 맡길 일 |
-|---|---|---|---|---|---|---|
-| Claude Haiku 5.5 | `claude-haiku-5-5` | 0.10 | 0.50 | 0.05 | 0.25 | 대량 프레임 1차 검수와 태깅 |
-| Claude Sonnet 5.5 | `claude-sonnet-5-5` | 2 | 10 | 1 | 5 | Haiku가 애매하다고 한 프레임 재확인, 결과 화면 비교 |
-| Claude Opus 5.5 | `claude-opus-5-5` | 4 | 20 | 2 | 10 | 컴파일 로그 분석, 논문과 SDK 문서 읽기 |
+| 모델 | 입력 | 출력 | Batch 입력 | Batch 출력 |
+|---|---|---|---|---|
+| Haiku 5.5 | 0.10 | 0.50 | 0.05 | 0.25 |
+| Sonnet 5.5 | 2 | 10 | 1 | 5 |
+| Opus 5.5 | 4 | 20 | 2 | 10 |
+
+모델 ID와 이 프로젝트에서 맡길 일은 다음과 같습니다.
+
+- Claude Haiku 5.5(`claude-haiku-5-5`): 대량 프레임 1차 검수와 태깅
+- Claude Sonnet 5.5(`claude-sonnet-5-5`): Haiku가 애매하다고 한 프레임 재확인, 결과 화면 비교
+- Claude Opus 5.5(`claude-opus-5-5`): 컴파일 로그 분석, 논문과 SDK 문서 읽기
 
 Haiku 5.5 가격은 프롬프트가 10만 토큰 이하일 때 값이고, 넘으면 입력 0.50, 출력 2.50으로 오릅니다 [C1]. 프레임 한 장씩 보내는 용도에서는 넘을 일이 없습니다. Claude Fable 5.2(입력 8, 출력 40)는 이 예산에서는 쓰지 않습니다 [C1].
 
@@ -57,17 +74,28 @@ Haiku 5.5 가격은 프롬프트가 10만 토큰 이하일 때 값이고, 넘으
 
 ## 3. 200달러 예산안
 
-| 항목 | 금액 | 모델 | 대략 할 수 있는 양 |
-|---|---|---|---|
-| 자체 영상 검수와 태깅 (Batch API) | 45달러 | Haiku 5.5 전체, Sonnet 5.5 일부 | Haiku로 5만 장(약 9달러)과 Sonnet 재확인 1만 장(약 36달러) |
-| 결과 화면 비교 판정 (Batch API) | 25달러 | Sonnet 5.5 | 합친 이미지 약 4,600장(합친 이미지는 토큰이 더 들어 장당 비용을 1.5배로 잡음) |
-| 로그 분석과 자료 읽기 (API) | 25달러 | Opus 5.5 | 0.30달러짜리 분석과 질문 합쳐 약 80번 |
-| 연산자 확인 자동 반복 (Agent SDK) | 40달러 | Sonnet 5.5 | 한 번 실행에 상한 5달러를 걸고 약 8번 |
-| ONNX 분할과 BEVPool 시험 (관리형 에이전트) | 20달러 | Sonnet 5.5 | 세션당 상한 5달러로 약 4번 |
-| NPU 소프트웨어 변경 확인 (관리형 에이전트) | 10달러 | Haiku 5.5 | 주 1회, 검색 10번 안팎이면 한 번에 0.1~0.2달러 수준(추정) |
-| 프롬프트 다듬기 (Playground) | 10달러 | 세 모델 | 용도별로 프레임 수십 장 시험 |
-| 예비 | 25달러 | | 5단계 데이터가 늘어날 때 |
-| 합계 | 200달러 | | |
+| 항목 | 금액 | 모델 |
+|---|---|---|
+| 자체 영상 검수와 태깅 | 45달러 | Haiku 5.5, Sonnet 5.5 |
+| 결과 화면 비교 판정 | 25달러 | Sonnet 5.5 |
+| 로그 분석과 자료 읽기 | 25달러 | Opus 5.5 |
+| 연산자 확인 자동 반복 | 40달러 | Sonnet 5.5 |
+| ONNX 분할과 BEVPool 시험 | 20달러 | Sonnet 5.5 |
+| NPU 소프트웨어 변경 확인 | 10달러 | Haiku 5.5 |
+| 프롬프트 다듬기 | 10달러 | 세 모델 |
+| 예비 | 25달러 | 해당 없음 |
+| 합계 | 200달러 | 해당 없음 |
+
+항목별로 대략 할 수 있는 양은 다음과 같습니다.
+
+- 자체 영상 검수와 태깅(Batch API): Haiku 5.5로 전체를 보고 일부를 Sonnet 5.5로 다시 봅니다. Haiku로 5만 장(약 9달러)과 Sonnet 재확인 1만 장(약 36달러)입니다.
+- 결과 화면 비교 판정(Batch API): 합친 이미지 약 4,600장입니다. 합친 이미지는 토큰이 더 들어 장당 비용을 1.5배로 잡았습니다.
+- 로그 분석과 자료 읽기(API): 0.30달러짜리 분석과 질문을 합쳐 약 80번입니다.
+- 연산자 확인 자동 반복(Agent SDK): 한 번 실행에 상한 5달러를 걸고 약 8번입니다.
+- ONNX 분할과 BEVPool 시험(관리형 에이전트): 세션당 상한 5달러로 약 4번입니다.
+- NPU 소프트웨어 변경 확인(관리형 에이전트): 주 1회 실행합니다. 검색 10번 안팎이면 한 번에 0.1~0.2달러 수준입니다. (추정)
+- 프롬프트 다듬기(Playground): 용도별로 프레임 수십 장을 시험합니다.
+- 예비: 5단계 데이터가 늘어날 때 씁니다.
 
 순서는 구현 단계에 맞춥니다. 0단계에서는 로그 분석과 자료 읽기, 0~3단계와 함께 진행하는 4.5절에서는 Agent SDK 연산자 확인을 먼저 씁니다. 2단계부터 영상 검수, 3단계와 4단계에서 화면 비교 판정과 관리형 에이전트 ONNX 분할 시험을 씁니다.
 
@@ -85,11 +113,9 @@ Haiku 5.5 가격은 프롬프트가 10만 토큰 이하일 때 값이고, 넘으
 
 [Spend limits](https://platform.claude.com/settings/spend-limits) 페이지에서 아래 한도와 알림을 설정합니다 [C4][C6].
 
-| 설정 | 위치 | 권장 값 |
-|---|---|---|
-| 조직 월 지출 한도 | Monthly spend limit의 Set limit | 크레딧을 넘겨 카드 결제가 되지 않도록 낮게 겁니다. 처음 달은 100달러로 시작합니다. |
-| 워크스페이스 월 지출 한도 | Workspace limits에서 워크스페이스 선택 후 Set limit | 한 달에 쓸 예산(예: 50달러) |
-| 이메일 알림 | 같은 화면의 Email notifications에서 Add notification | 한도의 50%, 80% |
+- 조직 월 지출 한도: Monthly spend limit의 Set limit에서 정합니다. 크레딧을 넘겨 카드 결제가 되지 않도록 낮게 겁니다. 처음 달은 100달러로 시작합니다.
+- 워크스페이스 월 지출 한도: Workspace limits에서 워크스페이스를 고른 뒤 Set limit에서 정합니다. 한 달에 쓸 예산(예: 50달러)을 넣습니다.
+- 이메일 알림: 같은 화면의 Email notifications에서 Add notification을 누르고 한도의 50%와 80%에 겁니다.
 
 한도에 닿으면 요청이 HTTP 400 `invalid_request_error`로 거절되며, 오류 메시지에 다시 쓸 수 있는 시점이 나옵니다 [C6]. 배치 작업 중간에 멈출 수 있으므로 큰 배치를 보내기 전에 남은 금액을 확인합니다. 조직의 사용 등급(tier)과 분당 한도는 [Rate limits](https://platform.claude.com/usage/limits) 페이지에서 볼 수 있습니다 [C6]. 가장 낮은 Start 등급도 Sonnet 5.5와 Haiku 5.5가 분당 4,000요청이어서 [C6] 이 프로젝트 규모에서는 문제가 되지 않습니다.
 
@@ -243,15 +269,13 @@ NPU 소프트웨어 변경 확인 에이전트는 웹 검색 도구만 켜고, �
 
 ## 참고 자료
 
-| 번호 | 출처 |
-|---|---|
-| C1 | Anthropic, Pricing. https://platform.claude.com/docs/en/about-claude/pricing |
-| C2 | Anthropic, Batch processing. https://platform.claude.com/docs/en/build-with-claude/batch-processing |
-| C3 | Anthropic, Vision (Image limits and costs). https://platform.claude.com/docs/en/build-with-claude/vision |
-| C4 | Anthropic, Workspaces. https://platform.claude.com/docs/en/manage-claude/workspaces |
-| C5 | Anthropic, Claude Code costs. https://code.claude.com/docs/en/costs |
-| C6 | Anthropic, Rate limits (Spend limits 포함). https://platform.claude.com/docs/en/api/rate-limits |
-| C7 | Anthropic, Get started with Claude. https://platform.claude.com/docs/en/get-started |
-| C8 | Anthropic, Agent SDK overview. https://code.claude.com/docs/en/agent-sdk/overview |
-| C9 | Anthropic, Agent SDK cost tracking. https://code.claude.com/docs/en/agent-sdk/cost-tracking |
-| C10 | Anthropic, Claude Managed Agents overview. https://platform.claude.com/docs/en/managed-agents/overview |
+- C1: Anthropic, Pricing. https://platform.claude.com/docs/en/about-claude/pricing
+- C2: Anthropic, Batch processing. https://platform.claude.com/docs/en/build-with-claude/batch-processing
+- C3: Anthropic, Vision (Image limits and costs). https://platform.claude.com/docs/en/build-with-claude/vision
+- C4: Anthropic, Workspaces. https://platform.claude.com/docs/en/manage-claude/workspaces
+- C5: Anthropic, Claude Code costs. https://code.claude.com/docs/en/costs
+- C6: Anthropic, Rate limits (Spend limits 포함). https://platform.claude.com/docs/en/api/rate-limits
+- C7: Anthropic, Get started with Claude. https://platform.claude.com/docs/en/get-started
+- C8: Anthropic, Agent SDK overview. https://code.claude.com/docs/en/agent-sdk/overview
+- C9: Anthropic, Agent SDK cost tracking. https://code.claude.com/docs/en/agent-sdk/cost-tracking
+- C10: Anthropic, Claude Managed Agents overview. https://platform.claude.com/docs/en/managed-agents/overview

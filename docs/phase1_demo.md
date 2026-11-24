@@ -15,17 +15,15 @@
                                                    - IPM LUT로 바닥 영상과 도로 마스크 합성
 ```
 
-| 파일 | 역할 |
-|---|---|
-| `realityview/camera_model.py` | 카메라 모델(핀홀, 어안), 픽셀과 지면 사이의 변환, PnP 결과를 자세로 변환 |
-| `realityview/bev.py` | BEV 격자, IPM 합성(`cv2.remap` LUT), 검출 결과를 지면 객체로 변환, 중복 병합 |
-| `realityview/detectors.py` | `HailoBackend`(라즈베리파이), `UltralyticsBackend`(PC 개발용) |
-| `realityview/tracker.py` | BEV 평면에서 가장 가까운 것끼리 맞추는 추적 |
-| `realityview/render.py` | 위에서 본 그림 렌더링과 대시보드 |
-| `realityview/sim.py` | 하드웨어 없이 확인하는 합성 장면과 가짜 검출기 |
-| `scripts/run_demo.py` | 실행 스크립트 |
-| `scripts/calib_intrinsics.py`, `scripts/calib_extrinsics.py` | 카메라 보정 |
-| `configs/two_cam.yaml`, `configs/four_cam.yaml` | 카메라 배치 예시 |
+- `realityview/camera_model.py`: 카메라 모델(핀홀, 어안), 픽셀과 지면 사이의 변환, PnP 결과를 자세로 변환
+- `realityview/bev.py`: BEV 격자, IPM 합성(`cv2.remap` LUT), 검출 결과를 지면 객체로 변환, 중복 병합
+- `realityview/detectors.py`: `HailoBackend`(라즈베리파이), `UltralyticsBackend`(PC 개발용)
+- `realityview/tracker.py`: BEV 평면에서 가장 가까운 것끼리 맞추는 추적
+- `realityview/render.py`: 위에서 본 그림 렌더링과 대시보드
+- `realityview/sim.py`: 하드웨어 없이 확인하는 합성 장면과 가짜 검출기
+- `scripts/run_demo.py`: 실행 스크립트
+- `scripts/calib_intrinsics.py`, `scripts/calib_extrinsics.py`: 카메라 보정
+- `configs/two_cam.yaml`, `configs/four_cam.yaml`: 카메라 배치 예시
 
 ## PC에서 바로 해 보기 (하드웨어 없음)
 

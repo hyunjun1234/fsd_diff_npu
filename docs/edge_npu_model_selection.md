@@ -6,13 +6,11 @@
 
 ## 1. 결론
 
-| 항목 | 추천 |
-|---|---|
-| 1단계 구현 방식 | 방식 B입니다. 카메라별로 검출과 세그멘테이션을 한 뒤 BEV로 합칩니다. 지면이 평평하다고 가정하고 미리 보정한 호모그래피를 씁니다. |
-| 2단계 구현 방식 | FlashOcc 계열 occupancy 모델을 나눠서 실행합니다. 이미지 백본과 BEV 인코더는 NPU에서, view transform은 CPU에서 돌립니다. |
-| NPU | Hailo-8(26 TOPS, Raspberry Pi AI HAT+)을 기본으로 하고, DEEPX DX-M1은 2단계에서 비교합니다. |
-| 카메라 | 1단계는 2대(전방과 후방), 2단계는 4대(전후좌우)입니다. 4대를 쓸 때는 동기화되는 멀티카메라 어댑터를 씁니다. |
-| 피해야 할 것 | BEVFormer처럼 deformable attention을 쓰는 모델을 NPU에 통째로 올리는 것입니다. grid_sample을 지원하지 않습니다. |
+- 1단계 구현 방식: 방식 B입니다. 카메라별로 검출과 세그멘테이션을 한 뒤 BEV로 합칩니다. 지면이 평평하다고 가정하고 미리 보정한 호모그래피를 씁니다.
+- 2단계 구현 방식: FlashOcc 계열 occupancy 모델을 나눠서 실행합니다. 이미지 백본과 BEV 인코더는 NPU에서, view transform은 CPU에서 돌립니다.
+- NPU: Hailo-8(26 TOPS, Raspberry Pi AI HAT+)을 기본으로 하고, DEEPX DX-M1은 2단계에서 비교합니다.
+- 카메라: 1단계는 2대(전방과 후방), 2단계는 4대(전후좌우)입니다. 4대를 쓸 때는 동기화되는 멀티카메라 어댑터를 씁니다.
+- 피해야 할 것: BEVFormer처럼 deformable attention을 쓰는 모델을 NPU에 통째로 올리는 것입니다. grid_sample을 지원하지 않습니다.
 
 두 NPU 모두 CNN은 잘 돌리지만, BEV 모델의 핵심인 기하 변환 연산(grid_sample, scatter와 BEVPool, 인덱스가 바뀌는 gather)은 사실상 지원하지 않습니다. 그래서 CNN은 NPU에, 기하 변환은 CPU에 맡기는 구조 말고는 현실적인 방법이 없습니다. 이 구조에 가장 잘 맞는 것이 방식 B와, LSS 계열인 FlashOcc를 나눠 실행하는 방법입니다.
 
@@ -20,16 +18,24 @@
 
 ### 2.1 NPU
 
-| 항목 | Hailo-8 (AI HAT+ 26T) | Hailo-8L (AI HAT+ 13T, AI Kit) | DEEPX DX-M1 |
+| 항목 | Hailo-8 | Hailo-8L | DX-M1 |
 |---|---|---|---|
-| 연산 성능 | 26 TOPS INT8 | 13 TOPS INT8 | 25 TOPS INT8 [3][4][5] |
-| 전력 | 약 2.5W | 약 1.5W | 2~5W [4], HAT 기준 최대 2.5~3W [5] |
-| 보드 DRAM | 없습니다. 칩 안의 SRAM을 쓰고 큰 모델은 context switch로 처리합니다. | 없습니다. | 있습니다. 모듈마다 달라서 LPDDR5 4GB [3][4]도 있고 Sixfab HAT+는 LPDDR4X 1GB [5]입니다. |
-| 모듈 인터페이스 | M.2 PCIe Gen3 4레인 | Hailo-8과 같습니다. | M.2 PCIe Gen3 4레인, 1레인으로도 동작 [3][4] |
-| 라즈베리파이 5에서의 실제 연결 | PCIe 1레인. 기본은 Gen2이고 Gen3로 올릴 수 있습니다. | Hailo-8과 같습니다. | PCIe Gen3 1레인 [5] |
-| 정밀도 | INT8, 일부 레이어는 16bit | Hailo-8과 같습니다. | INT8 (IQ8) [3] |
-| 컴파일러와 런타임 | Dataflow Compiler(DFC)로 HEF를 만들고 HailoRT로 실행 | Hailo-8과 같습니다. | DX-COM으로 DXNN을 만들고 DX-RT로 실행 [5] |
-| 라즈베리파이 지원 | 공식 AI HAT+, rpicam-apps와 hailo-apps 연동, Model Zoo에 모델이 많습니다. | Hailo-8과 같습니다. | Sixfab AI HAT+(90달러, 25 TOPS) 같은 다른 회사 제품 [5] |
+| 연산 성능 | 26 TOPS | 13 TOPS | 25 TOPS |
+| 전력 | 약 2.5W | 약 1.5W | 2~5W |
+| 보드 DRAM | 없음 | 없음 | 있음 |
+| 정밀도 | INT8 | INT8 | INT8 |
+| 컴파일러 | DFC | DFC | DX-COM |
+| 런타임 | HailoRT | HailoRT | DX-RT |
+
+Hailo-8은 AI HAT+ 26T, Hailo-8L은 AI HAT+ 13T와 AI Kit에 들어가는 칩입니다. 연산 성능은 모두 INT8 기준이며 DX-M1의 값은 [3][4][5]에서 나왔습니다. 항목별로 덧붙일 내용은 다음과 같습니다.
+
+- 전력: DX-M1은 2~5W이고 [4], HAT 기준으로는 최대 2.5~3W입니다. [5]
+- 보드 DRAM: Hailo는 칩 안의 SRAM을 쓰고 큰 모델은 context switch로 처리합니다. DX-M1은 모듈마다 달라서 LPDDR5 4GB [3][4]도 있고 Sixfab HAT+는 LPDDR4X 1GB [5]입니다.
+- 모듈 인터페이스: 세 제품 모두 M.2 PCIe Gen3 4레인이며 DX-M1은 1레인으로도 동작합니다. [3][4]
+- 라즈베리파이 5에서의 실제 연결: PCIe 1레인입니다. Hailo는 기본이 Gen2이고 Gen3로 올릴 수 있으며, DX-M1은 Gen3 1레인입니다. [5]
+- 정밀도: Hailo는 일부 레이어가 16bit입니다. DX-M1은 IQ8이라는 INT8 방식을 씁니다. [3]
+- 컴파일러와 런타임: Hailo는 Dataflow Compiler(DFC)로 HEF를 만들고 HailoRT로 실행합니다. DX-M1은 DX-COM으로 DXNN을 만들고 DX-RT로 실행합니다. [5]
+- 라즈베리파이 지원: Hailo는 공식 AI HAT+가 있고 rpicam-apps, hailo-apps와 연동되며 Model Zoo에 모델이 많습니다. DX-M1은 Sixfab AI HAT+(90달러, 25 TOPS) 같은 다른 회사 제품을 씁니다. [5]
 
 Hailo-8은 외부 DRAM이 없어서 여러 모델을 한꺼번에 올리거나 큰 모델을 돌리면 context switch 때문에 처리량이 떨어집니다. 방식 B처럼 작은 YOLO 하나를 카메라 수만큼 묶어 돌리는 데는 문제가 없습니다.
 
@@ -55,17 +61,29 @@ NPU 입력은 640x640(방식 B)이나 256x704(BEV 계열, nuScenes에서 흔히 
 
 BEV와 occupancy 모델에 필요한 연산자를 기준으로 정리했습니다.
 
-| 연산자 또는 블록 | 쓰이는 곳 | Hailo DFC | DEEPX DX-COM |
-|---|---|---|---|
-| Conv, DWConv, BN, ReLU와 SiLU, Add와 Concat, Pool | CNN 백본, BEV 인코더, 검출과 세그멘테이션 헤드 | 지원 [2] | 지원 (CNN이 주력) |
-| Resize(nearest, bilinear), Upsample | FPN, 세그멘테이션 디코더 | 지원. grid_sample 대신 쓰라고 권하기도 합니다. [1] | 지원 |
-| Softmax, 작은 MatMul | depth 분포, 어텐션 | 일부 지원 | 일부 지원. 트랜스포머 디코더는 지원하지 않는다는 언급이 있습니다. [5] |
-| GridSample (grid_sample) | BEVFormer, Fast-BEV의 일부 구현, deformable attention | 지원하지 않고 지원 계획도 없습니다. [1] | 확인 필요. 지원하지 않는다고 보고 설계합니다. |
-| Deformable attention | BEVFormer, 여러 DETR 계열 | 지원하지 않습니다. 커뮤니티에도 CPU로 넘겼다는 사례뿐입니다. [1] | 확인 필요. 지원하지 않는다고 보고 설계합니다. |
-| GatherElements, ScatterND, 인덱스가 바뀌는 인덱싱 | BEVPool, voxel pooling, LUT 투영 | 지원하지 않습니다. grid_sample을 gather로 풀어 써도 파서 오류가 납니다. [6] | 확인 필요. CPU에서 처리한다고 보고 설계합니다. |
-| 5차원 텐서의 Slice, Reshape, Transpose | 3D voxel 처리 | 4번 축 slice처럼 지원하지 않는 경우가 있습니다. [6] | 확인 필요 |
-| 3D Conv | 일부 occupancy 헤드 | 일부 지원 | 확인 필요 |
-| Channel-to-Height (Reshape) | FlashOcc 출력 | 마지막 출력의 reshape이므로 CPU에서 처리하면 상관없습니다. | Hailo와 같습니다. |
+| 연산자 | Hailo DFC | DX-COM |
+|---|---|---|
+| Conv, BN, ReLU, Pool 등 | 지원 | 지원 |
+| Resize, Upsample | 지원 | 지원 |
+| Softmax, 작은 MatMul | 일부 지원 | 일부 지원 |
+| GridSample | 미지원 | 확인 필요 |
+| Deformable attention | 미지원 | 확인 필요 |
+| GatherElements, ScatterND | 미지원 | 확인 필요 |
+| 5차원 Slice, Reshape | 일부 미지원 | 확인 필요 |
+| 3D Conv | 일부 지원 | 확인 필요 |
+| Channel-to-Height | CPU에서 처리 | CPU에서 처리 |
+
+연산자마다 쓰이는 곳과 덧붙일 내용은 다음과 같습니다.
+
+- Conv, DWConv, BN, ReLU와 SiLU, Add와 Concat, Pool: CNN 백본, BEV 인코더, 검출과 세그멘테이션 헤드에 쓰입니다. Hailo는 지원하고 [2], DEEPX는 CNN이 주력입니다.
+- Resize(nearest, bilinear), Upsample: FPN과 세그멘테이션 디코더에 쓰입니다. Hailo는 grid_sample 대신 쓰라고 권하기도 합니다. [1]
+- Softmax, 작은 MatMul: depth 분포와 어텐션에 쓰입니다. DEEPX는 트랜스포머 디코더를 지원하지 않는다는 언급이 있습니다. [5]
+- GridSample(grid_sample): BEVFormer, Fast-BEV의 일부 구현, deformable attention에 쓰입니다. Hailo는 지원하지 않고 지원 계획도 없습니다. [1] DEEPX는 지원하지 않는다고 보고 설계합니다.
+- Deformable attention: BEVFormer와 여러 DETR 계열에 쓰입니다. Hailo 커뮤니티에도 CPU로 넘겼다는 사례뿐입니다. [1] DEEPX는 지원하지 않는다고 보고 설계합니다.
+- GatherElements, ScatterND, 인덱스가 바뀌는 인덱싱: BEVPool, voxel pooling, LUT 투영에 쓰입니다. Hailo는 grid_sample을 gather로 풀어 써도 파서 오류가 납니다. [6] DEEPX는 CPU에서 처리한다고 보고 설계합니다.
+- 5차원 텐서의 Slice, Reshape, Transpose: 3D voxel 처리에 쓰입니다. Hailo는 4번 축 slice처럼 지원하지 않는 경우가 있습니다. [6]
+- 3D Conv: 일부 occupancy 헤드에 쓰입니다.
+- Channel-to-Height(Reshape): FlashOcc 출력에 쓰입니다. 마지막 출력의 reshape이므로 CPU에서 처리하면 상관없습니다.
 
 두 NPU 모두 BEV 공간으로 옮기는 단계(view transform)를 실행할 수 없다고 보고 설계해야 합니다. 이 단계는 연산량이 작아서 CPU로 충분합니다. 예를 들어 카메라 4대, 특징맵 16x44, depth bin 59개, 채널 64개인 LSS 방식 BEVPool은 4x59x16x44x64, 약 1,060만 번의 곱셈과 덧셈입니다. 라즈베리파이 5의 Cortex-A76 4코어에서 NumPy나 C로 수 ms면 될 것으로 보이며 측정이 필요합니다. BEVPIPE 논문[7]도 인텔 내장 GPU라는 다른 하드웨어에서 같은 결론을 냈습니다. dense 연산은 가속기에 두고 scatter 계열의 기하 연산은 가속기 밖에서 돌리는 분할 실행입니다.
 
@@ -111,13 +129,14 @@ Depth Anything 소형 모델 같은 단안 depth 모델로 거리를 보정할 �
 
 | 기준 | Fast-BEV | FlashOcc | 방식 B |
 |---|---|---|---|
-| NPU 연산자 호환 | 중간(투영을 CPU로 분리) | 중간(BEVPool을 CPU로 분리) | 높음 |
-| 재학습 | 필요 | 필요 | 필요 없음(미세조정은 선택) |
-| 출력 정보 | 3D 박스 | 3D occupancy | 2D 검출과 세그멘테이션을 평면에 투영 |
-| 리얼리티 뷰와의 유사도 | 중간 | 높음 | 중간보다 높음(보기에는 충분) |
-| 예상 FPS (라즈베리파이 5와 Hailo-8, 카메라 4대, 추정) | 5~10 | 3~8 | 10~20 |
-| 구현 난이도 | 중간보다 높음 | 높음 | 낮음 |
-| 데이터 | nuScenes 재가공 | nuScenes와 Occ3D 재가공 | COCO, BDD100K 사전학습 모델 그대로 |
+| NPU 연산자 호환 | 중간 | 중간 | 높음 |
+| 재학습 | 필요 | 필요 | 필요 없음 |
+| 출력 | 3D 박스 | 3D occupancy | 2D 결과의 평면 투영 |
+| 리얼리티 뷰 유사도 | 중간 | 높음 | 중간 이상 |
+| 예상 FPS | 5~10 | 3~8 | 10~20 |
+| 구현 난이도 | 중간 이상 | 높음 | 낮음 |
+
+Fast-BEV는 투영을, FlashOcc는 BEVPool을 CPU로 분리해야 해서 연산자 호환이 중간입니다. 방식 B는 재학습이 필요 없고 미세조정은 선택이며, 출력은 2D 검출과 세그멘테이션을 평면에 투영한 것이지만 보기에는 충분합니다. 예상 FPS는 라즈베리파이 5와 Hailo-8, 카메라 4대 기준의 추정입니다. 데이터는 Fast-BEV가 nuScenes 재가공, FlashOcc가 nuScenes와 Occ3D 재가공, 방식 B가 COCO와 BDD100K 사전학습 모델 그대로입니다.
 
 FPS는 공개된 Model Zoo의 단일 모델 성능과 위 연산량으로 추정한 값입니다. 1단계가 끝나면 측정해서 고칩니다.
 
