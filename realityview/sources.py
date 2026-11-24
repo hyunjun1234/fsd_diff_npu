@@ -65,6 +65,11 @@ class PiCameraSource:
 
         self.size = (int(width), int(height))
         self._closed = False
+        # 지연 측정용(기본 꺼짐). True로 켜면 read()가 영상과 같은 요청에서 센서 타임스탬프를 함께 꺼낸다.
+        # capture_metadata()를 따로 부르면 다른 프레임의 값이 나오므로 capture_request() 하나에서 둘 다 받는다.
+        self.want_timestamp = False
+        # 마지막 read()가 돌려준 프레임의 SensorTimestamp(ns, time.monotonic_ns()와 같은 시계). 모르면 None
+        self.last_timestamp_ns: int | None = None
         self.cam = Picamera2(index)
         try:
             kw = picamera_config_kwargs(width, height, fps, sensor_size)
@@ -86,7 +91,10 @@ class PiCameraSource:
             raise
 
     def read(self) -> np.ndarray | None:
-        f = self.cam.capture_array("main")
+        if self.want_timestamp:
+            f = self._read_with_timestamp()
+        else:
+            f = self.cam.capture_array("main")
         if f is None:
             return None
         # 일부 형식은 4채널(XRGB)로 오므로 3채널로 맞춘다
@@ -94,6 +102,17 @@ class PiCameraSource:
             f = f[:, :, :3]
         if (f.shape[1], f.shape[0]) != self.size:
             f = cv2.resize(f, self.size)
+        return f
+
+    def _read_with_timestamp(self) -> np.ndarray | None:
+        """영상과 메타데이터를 같은 요청에서 받는다. 요청은 꼭 release()해야 카메라 버퍼가 돌아간다."""
+        req = self.cam.capture_request()
+        try:
+            f = req.make_array("main")
+            ts = req.get_metadata().get("SensorTimestamp")
+        finally:
+            req.release()
+        self.last_timestamp_ns = int(ts) if ts is not None else None
         return f
 
     def metadata(self) -> dict:
@@ -119,6 +138,9 @@ class OpenCvSource:
         self.cap = cv2.VideoCapture(uri)
         self.size = (width, height)
         self.loop = loop and isinstance(uri, str)
+        # 파일과 USB 카메라에는 센서 타임스탬프가 없다. 지연 측정에서 "모름"으로 처리한다
+        self.want_timestamp = False
+        self.last_timestamp_ns: int | None = None
         if isinstance(uri, int):
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)

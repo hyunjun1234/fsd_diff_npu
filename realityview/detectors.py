@@ -172,6 +172,19 @@ class HailoBackend:
         self._frame_idx = 0
         self._last_masks: list[np.ndarray | None] = []
 
+    def chip_temperature(self) -> float | None:
+        """Hailo-8 칩 온도(도, 센서 두 개 중 높은 값). 읽지 못하면 None.
+
+        추론 중에도 제어 채널로 읽을 수 있다. 30분 연속 실행에서 방열 없이 120도까지 올라
+        HailoRT가 클럭을 낮추고 스트림을 닫은 적이 있어, 장시간 실행 기록에 함께 남긴다.
+        """
+        try:
+            dev = self.vdevice.get_physical_devices()[0]
+            t = dev.control.get_chip_temperature()
+            return round(float(max(t.ts0_temperature, t.ts1_temperature)), 1)
+        except Exception:
+            return None
+
     def infer(self, frames: Sequence[np.ndarray]) -> list[FrameResult]:
         # 카메라 N대 영상을 한 배치로 넣는다. frames는 BGR.
         tm = self.timer

@@ -14,7 +14,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from realityview.config import load_config  # noqa: E402
 from realityview.pipeline import RealityViewPipeline  # noqa: E402
-from realityview.profiling import StageTimer, format_table, read_pi_health  # noqa: E402
+from realityview.profiling import (  # noqa: E402
+    HealthLogger,
+    LatencyRecorder,
+    StageTimer,
+    format_table,
+    read_pi_health,
+)
 
 # 리얼리티 뷰 1단계 데모 실행.
 #
@@ -34,6 +40,14 @@ from realityview.profiling import StageTimer, format_table, read_pi_health  # no
 #   # 두 NPU 동시: 검출은 Hailo-8, 도로 세그는 DX-M1 별도 스레드(npu.seg_every 프레임마다)
 #   timeout -s INT -k 10 180 python scripts/run_demo.py --config configs/two_cam_current.yaml \
 #       --backend hailo --seg-npu dxm1 --headless --frames 330 --profile --profile-out out/measure/02_profile_dual.json
+#
+#   # 30분 연속 실행(soak): 1분마다 FPS, 스로틀링, 온도, 메모리를 csv로. 누수를 보려면 --profile은 끈다
+#   timeout -s INT -k 10 2000 python scripts/run_demo.py --config configs/two_cam_current.yaml \
+#       --backend hailo --headless --duration 1800 --health-csv out/measure/08_soak.csv
+#
+#   # 결과 화면을 동영상으로 남기기(60초). --profile을 같이 주면 센서 시각에서 화면 완성까지의 지연도 잰다
+#   timeout -s INT -k 10 120 python scripts/run_demo.py --config configs/two_cam_current.yaml \
+#       --backend hailo --headless --duration 60 --record-video out/video/hailo_60s.mp4
 #
 #   # PC에서 녹화 영상으로 개발 (ultralytics 필요)
 #   python scripts/run_demo.py --backend ultralytics --video front=rec/front.mp4 --video rear=rec/rear.mp4
@@ -72,7 +86,26 @@ def build_parser() -> argparse.ArgumentParser:
     # ---- 단계별 시간 측정(기본 꺼짐) ----
     ap.add_argument("--profile", action="store_true", help="단계별 처리 시간을 재서 표로 출력")
     ap.add_argument("--profile-out", help="측정 결과 JSON 경로(--profile일 때). 예: out/measure/01_profile.json")
-    ap.add_argument("--warmup", type=int, default=30, help="통계에서 뺄 앞쪽 프레임 수(--profile일 때)")
+    ap.add_argument("--warmup", type=int, default=30, help="통계에서 뺄 앞쪽 프레임 수(--profile일 때). 녹화도 이 뒤부터")
+    # ---- 장시간 실행과 상태 기록(기본 꺼짐) ----
+    ap.add_argument("--duration", type=float, default=0.0, help="이 시간(초)이 지나면 스스로 끝냄. 0이면 제한 없음")
+    ap.add_argument("--health-csv", help="일정 간격으로 FPS, throttled, 온도, 메모리(RSS)를 남길 csv 경로")
+    ap.add_argument("--health-interval", type=float, default=60.0, help="--health-csv 기록 간격(초). 기본 60")
+    ap.add_argument(
+        "--hailo-stop-temp",
+        type=float,
+        default=0.0,
+        help="--health-csv 기록 때 읽은 Hailo-8 칩 온도가 이 값(도) 이상이면 스스로 끝냄. 0이면 끔. 예: 95",
+    )
+    # ---- 결과 화면 녹화(기본 꺼짐) ----
+    ap.add_argument("--record-video", help="대시보드를 동영상으로 저장(.mp4). 예: out/video/hailo_60s.mp4")
+    ap.add_argument(
+        "--record-fps",
+        type=float,
+        default=0.0,
+        help="녹화 파일 fps. 0이면 워밍업 동안 잰 루프 속도를 반올림해 쓴다(재생 속도는 실제 시간에 맞춤)",
+    )
+    ap.add_argument("--record-codec", default="avc1,mp4v", help="시도할 코덱 순서(쉼표 구분). 기본 avc1,mp4v")
     return ap
 
 
@@ -150,6 +183,22 @@ def make_dxm1_backend(npu: dict, timer: StageTimer, det: bool):
 
 
 # ---------------------------------------------------------------------------
+# 녹화기 만들기
+# ---------------------------------------------------------------------------
+def make_recorder(args, frames_so_far: int, elapsed_s: float):
+    """--record-video 녹화기를 만든다. fps를 정하지 않았으면 지금까지의 루프 속도를 반올림해 쓴다."""
+    from realityview.recorder import VideoRecorder
+
+    fps = float(args.record_fps)
+    if fps <= 0:
+        # 워밍업이 0이면 잰 값이 없으니 15로 둔다. 시간축은 녹화기가 실제 시각에 맞춘다
+        fps = float(max(1, round(frames_so_far / elapsed_s))) if frames_so_far > 0 and elapsed_s > 0 else 15.0
+    codecs = tuple(c.strip() for c in args.record_codec.split(",") if c.strip())
+    print(f"녹화 시작: {args.record_video} fps={fps:g} 코덱 후보={codecs}", flush=True)
+    return VideoRecorder(args.record_video, fps, codecs=codecs)
+
+
+# ---------------------------------------------------------------------------
 # 실행
 # ---------------------------------------------------------------------------
 def main() -> None:
@@ -158,6 +207,9 @@ def main() -> None:
     if args.seg_mask_test != "none" and args.seg_npu == "none":
         # 바꿔 줄 세그 출력이 없으니 아무 효과가 없다. 조용히 넘어가지 않고 알려 준다
         ap.error("--seg-mask-test 는 --seg-npu dxm1 과 같이 써야 합니다")
+    if args.hailo_stop_temp > 0 and not args.health_csv:
+        # 온도는 --health-csv 기록 때만 읽으므로, 없으면 멈춤 조건이 조용히 꺼진다. 미리 알려 준다
+        ap.error("--hailo-stop-temp 는 --health-csv 와 같이 써야 합니다")
 
     cams, grid, cfg = load_config(args.config)
     if args.bev_res:
@@ -247,7 +299,28 @@ def main() -> None:
     det_total = 0
     loop = {"frames": 0, "measured_frames": 0, "measured_renders": 0, "elapsed_s": 0.0}
     t_measure0, renders0 = None, 0
-    last = time.perf_counter()
+    # 지연 측정: 렌더링 스레드 모드에서는 step()이 돌려준 화면이 이번 프레임 것이 아니라서 재지 않는다
+    latency = None
+    sensor_hist: dict[int, int | None] = {}  # 프레임 번호 -> 카메라 0번 센서 시각(세그 마스크 나이 계산용)
+    if args.profile and sources and not args.render_thread and all(hasattr(s, "want_timestamp") for s in sources):
+        for s in sources:
+            s.want_timestamp = True
+        latency = LatencyRecorder([c.name for c in cams], warmup=args.warmup)
+    recorder = None
+    rec_stats = None
+    health = None
+    if args.health_csv:
+        # Hailo 백엔드면 칩 온도 열을 더한다(방열 없이 오래 돌리면 Hailo-8이 먼저 뜨거워진다)
+        temp_fn = getattr(backend, "chip_temperature", None) if world is None else None
+        health = HealthLogger(
+            args.health_csv,
+            args.health_interval,
+            extra_fn=(lambda: {"hailo_temp_c": temp_fn()}) if temp_fn else None,
+            extra_columns=("hailo_temp_c",) if temp_fn else (),
+        )
+    if health is not None:
+        health.start()
+    t_first = last = time.perf_counter()
     try:
         while args.frames == 0 or n < args.frames:
             t_loop = time.perf_counter()
@@ -261,7 +334,10 @@ def main() -> None:
                     world.step(dt)
                     frames = world.render()
                 else:
-                    frames = [s.read() for s in sources]
+                    frames, read_done = [], []
+                    for s in sources:
+                        frames.append(s.read())
+                        read_done.append(time.monotonic_ns())  # 지연 측정용: 영상을 손에 넣은 시각
             if any(f is None for f in frames):
                 break
             if world is None:
@@ -269,10 +345,22 @@ def main() -> None:
                 dt, last = now - last, now
             # 2) 검출부터 렌더링까지
             out = pipe.step(frames, dt)
+            done_ns = time.monotonic_ns()  # 대시보드 완성 시각(녹화, 화면 표시 전)
+            # 지연 기록(--profile이고 센서 타임스탬프가 있을 때만)
+            if latency is not None:
+                sensor_ns = [getattr(s, "last_timestamp_ns", None) for s in sources]
+                sensor_hist[n] = sensor_ns[0]
+                sensor_hist.pop(n - 256, None)  # 세그 마스크를 찾는 데 필요한 만큼만 남긴다
+                seg_ns = sensor_hist.get(pipe.last_mask_idx) if pipe.last_mask_idx is not None else None
+                latency.add(sensor_ns, read_done, done_ns, seg_ns)
             ndet = sum(len(r.detections) for r in out.results)
             det_total += ndet
             det_frames += int(ndet > 0)
             # 3) 저장과 화면 표시
+            if args.record_video and n >= args.warmup:
+                if recorder is None:
+                    recorder = make_recorder(args, n, t_loop - t_first)
+                recorder.submit(out.dashboard)
             if args.save:
                 if writer is None:
                     os.makedirs(os.path.dirname(args.save) or ".", exist_ok=True)
@@ -292,6 +380,14 @@ def main() -> None:
                 )
             timer.end_frame((time.perf_counter() - t_loop) * 1e3)
             n += 1
+            row = health.tick() if health is not None else None
+            hot = row.get("hailo_temp_c") if row else None
+            if args.hailo_stop_temp > 0 and hot is not None and hot >= args.hailo_stop_temp:
+                print(f"Hailo-8 온도 {hot}도가 --hailo-stop-temp {args.hailo_stop_temp:g}도 이상이라 끝냅니다", flush=True)
+                break
+            if args.duration > 0 and time.perf_counter() - t_first >= args.duration:
+                print(f"--duration {args.duration:g}초가 지나 끝냅니다", flush=True)
+                break
     except KeyboardInterrupt:
         # timeout -s INT로 끊겨도 아래 finally에서 측정 결과를 남기고 장치를 놓는다
         print("중단 신호를 받아 정리합니다", flush=True)
@@ -301,11 +397,20 @@ def main() -> None:
             loop["elapsed_s"] = time.perf_counter() - t_measure0
             loop["measured_frames"] = n - timer.warmup
             loop["measured_renders"] = pipe.render_count - renders0
+        if health is not None:
+            health.close()
+        if recorder is not None:
+            # 큐에 남은 영상을 다 쓰고 닫는다. 측정 JSON에 녹화 결과를 같이 남기려고 먼저 닫는다
+            rec_stats = recorder.close()
+            print(f"녹화: {rec_stats}", flush=True)
         # 측정 결과는 장치를 닫기 전에 먼저 쓴다(닫다가 멈춰도 결과는 남게)
         if args.profile:
-            rep = profile_report(
-                args, timer, pipe, health_start, loop, {"det_frames": det_frames, "det_total": det_total}
-            )
+            extra = {"det_frames": det_frames, "det_total": det_total, "record": rec_stats}
+            if latency is not None:
+                extra["latency"] = latency.summary()
+            rep = profile_report(args, timer, pipe, health_start, loop, extra)
+            if latency is not None:
+                print(f"latency={json.dumps(extra['latency'], ensure_ascii=False)}", flush=True)
             print(rep["table_md"], flush=True)
             print(
                 f"loop_fps={rep['loop_fps']} display_fps={rep['display_fps']} frames={n} "

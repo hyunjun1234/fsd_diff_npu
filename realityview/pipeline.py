@@ -248,6 +248,9 @@ class RealityViewPipeline:
         self._seg_missing = 0  # 아직 첫 마스크가 없어 마스크 없이 지나간 프레임 수
         self._seg_last_idx = None  # 마지막으로 도로 비율을 센 마스크의 프레임 번호
         self._seg_fracs: list[float] = []  # 새 마스크마다 도로 화소 비율(카메라 평균)
+        # 바로 앞 step()에서 쓴 세그 마스크가 몇 번째 프레임 영상으로 만든 것인지(없으면 None).
+        # 지연 측정에서 그 프레임의 센서 시각을 찾아 "마스크가 몇 ms 묵었는지"를 계산할 때 쓴다
+        self.last_mask_idx: int | None = None
         # 탑뷰 도로 마스크 캐시: (카메라별 원본 마스크 객체 목록, 합성한 탑뷰 마스크)
         self._road_cache: tuple[list, np.ndarray] | None = None
         self.road_cache_hits = 0  # 마스크가 그대로라 합성을 건너뛴 프레임 수
@@ -283,6 +286,7 @@ class RealityViewPipeline:
             "dropped": self._seg.dropped,
             "mask_age_mean": float(np.mean(ages)) if ages else None,
             "mask_age_max": int(max(ages)) if ages else None,
+            "mask_age_p95": float(np.percentile(ages, 95)) if ages else None,
             "frames_without_mask": self._seg_missing,
             "mask_fraction_mean": float(np.mean(self._seg_fracs)) if self._seg_fracs else None,
         }
@@ -385,8 +389,10 @@ class RealityViewPipeline:
         latest = self._seg.latest()  # 세그 스레드가 예외로 멈췄으면 여기서 다시 낸다
         if latest is None or len(latest[1]) != len(results):
             self._seg_missing += 1
+            self.last_mask_idx = None
             return
         mask_idx, masks = latest
+        self.last_mask_idx = mask_idx
         # 세그 NPU를 따로 고른 것이므로 검출 백엔드가 만든 마스크가 있어도 이 마스크로 바꾼다
         for r, m in zip(results, masks):
             r.road_mask = m

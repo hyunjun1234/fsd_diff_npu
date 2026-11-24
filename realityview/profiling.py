@@ -149,3 +149,201 @@ def read_pi_health() -> dict:
         except (OSError, subprocess.SubprocessError):
             out[key] = None
     return out
+
+
+# ---------------------------------------------------------------------------
+# 메모리 사용량 (/proc 읽기, 리눅스 전용)
+# ---------------------------------------------------------------------------
+def read_proc_mem(status_path: str = "/proc/self/status", meminfo_path: str = "/proc/meminfo") -> dict:
+    """이 프로세스의 RSS와 시스템 전체 가용 메모리(MB). 맥처럼 /proc이 없으면 값이 None.
+
+    rss_mb: 이 프로세스가 실제로 차지한 메모리(VmRSS). 새는지 볼 때 이 값의 추세를 본다.
+    mem_available_mb: 시스템 전체에서 더 쓸 수 있는 메모리(MemAvailable). 카메라, NPU 드라이버 버퍼처럼
+    RSS에 잡히지 않는 메모리가 새면 이 값이 줄어든다.
+    """
+    out = {"rss_mb": None, "mem_available_mb": None}
+    for path, key, field in ((status_path, "rss_mb", "VmRSS:"), (meminfo_path, "mem_available_mb", "MemAvailable:")):
+        try:
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    if line.startswith(field):
+                        out[key] = round(int(line.split()[1]) / 1024.0, 1)  # kB 단위를 MB로
+                        break
+        except OSError:
+            pass
+    return out
+
+
+def _parse_vcgencmd(text: str | None) -> str | None:
+    """'throttled=0x0' 이나 "temp=55.4'C" 에서 = 뒤의 값만 꺼낸다(0x0, 55.4)."""
+    if not text or "=" not in text:
+        return None
+    return text.split("=", 1)[1].replace("'C", "").strip()
+
+
+# ---------------------------------------------------------------------------
+# 장시간 실행 상태 기록 (N초마다 csv 한 줄)
+# ---------------------------------------------------------------------------
+class HealthLogger:
+    """장시간 실행(soak) 동안 일정 간격으로 FPS, 스로틀링, 온도, 메모리를 csv에 한 줄씩 남긴다.
+
+    - fps는 직전 줄 이후 구간의 값이다(그 구간 프레임 수 / 구간 시간). 처음부터의 평균이 아니라서
+      시간에 따라 떨어지는지 바로 보인다.
+    - --profile의 StageTimer는 프레임마다 값을 쌓아 메모리가 늘어나므로, 메모리 누수를 볼 때는
+      --profile 없이 이 기록만 켠다.
+    - 줄마다 flush해서 도중에 끊겨도 앞 줄은 남는다.
+    - clock, health_fn, mem_fn을 바꿔 끼울 수 있어 하드웨어 없이 시험한다.
+    """
+
+    COLUMNS = ("elapsed_s", "frames", "fps", "throttled", "soc_temp_c", "rss_mb", "mem_available_mb")
+
+    def __init__(
+        self,
+        path: str,
+        interval_s: float = 60.0,
+        clock=time.monotonic,
+        health_fn=None,
+        mem_fn=None,
+        extra_fn=None,
+        extra_columns: tuple[str, ...] = (),
+    ):
+        self.path = path
+        # 추가 열(예: NPU 온도). extra_fn()이 {열 이름: 값}을 돌려준다. 주지 않으면 기본 열만 쓴다
+        self._extra_fn = extra_fn
+        self.columns = self.COLUMNS + tuple(extra_columns)
+        self.interval_s = float(interval_s)
+        self._clock = clock
+        self._health_fn = health_fn or read_pi_health
+        self._mem_fn = mem_fn or read_proc_mem
+        self.rows: list[dict] = []
+        self._t0 = None  # 기록 시작 시각
+        self._t_last = None  # 직전 줄 시각
+        self._frames = 0  # 직전 줄 이후 프레임 수
+        self._f = None
+
+    def start(self) -> None:
+        """기록을 시작한다. 시작 상태를 elapsed 0인 줄로 먼저 남긴다."""
+        import csv
+        import os
+
+        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+        self._f = open(self.path, "w", newline="", encoding="utf-8")
+        self._csv = csv.DictWriter(self._f, fieldnames=self.columns, extrasaction="ignore")
+        self._csv.writeheader()
+        self._t0 = self._t_last = self._clock()
+        self._write(self._t0)
+
+    def tick(self) -> dict | None:
+        """프레임 하나가 끝날 때마다 부른다. 간격이 지났으면 한 줄을 쓰고 그 줄을 돌려준다(아니면 None)."""
+        if self._f is None:
+            return None
+        self._frames += 1
+        now = self._clock()
+        if now - self._t_last >= self.interval_s:
+            return self._write(now)
+        return None
+
+    def close(self) -> None:
+        """끝낼 때 부른다. 마지막 줄 이후 남은 구간이 있으면 한 줄 더 쓰고 파일을 닫는다."""
+        if self._f is None:
+            return
+        if self._frames > 0:
+            self._write(self._clock())
+        self._f.close()
+        self._f = None
+
+    def _write(self, now: float) -> dict:
+        h = self._health_fn()
+        m = self._mem_fn()
+        span = now - self._t_last
+        row = {
+            "elapsed_s": round(now - self._t0, 1),
+            "frames": self._frames,
+            "fps": round(self._frames / span, 2) if span > 0 else None,
+            "throttled": _parse_vcgencmd(h.get("throttled")),
+            "soc_temp_c": _parse_vcgencmd(h.get("temp")),
+            "rss_mb": m.get("rss_mb"),
+            "mem_available_mb": m.get("mem_available_mb"),
+        }
+        if self._extra_fn is not None:
+            row.update(self._extra_fn())
+        self.rows.append(row)
+        self._csv.writerow(row)
+        self._f.flush()
+        self._t_last, self._frames = now, 0
+        return row
+
+
+# ---------------------------------------------------------------------------
+# 지연 시간 (센서 타임스탬프에서 화면 완성까지)
+# ---------------------------------------------------------------------------
+def _stats(values: list[float]) -> dict | None:
+    if not values:
+        return None
+    a = np.asarray(values, dtype=np.float64)
+    return {
+        "n": int(a.size),
+        "mean_ms": round(float(a.mean()), 2),
+        "p50_ms": round(float(np.percentile(a, 50)), 2),
+        "p95_ms": round(float(np.percentile(a, 95)), 2),
+        "max_ms": round(float(a.max()), 2),
+    }
+
+
+class LatencyRecorder:
+    """프레임마다 "센서가 찍은 시각"에서 "대시보드가 완성된 시각"까지를 잰다.
+
+    - 시각은 모두 time.monotonic_ns()와 같은 시계(ns)로 받는다. Picamera2의 SensorTimestamp가 이 시계다
+      (파이에서 CLOCK_MONOTONIC과 CLOCK_BOOTTIME 차이가 0인 것을 확인했다).
+    - 카메라 N대를 차례로 읽으므로 카메라마다 따로 모은다. "oldest"는 그 프레임에 쓴 영상 중 가장 오래된 것
+      기준이라 화면이 실제보다 늦은 정도의 상한이다.
+    - capture_wait는 센서 시각에서 read()가 영상을 돌려준 시각까지다. 이 값이 크면 카메라 큐에 쌓인 묵은
+      프레임을 받고 있다는 뜻이다.
+    - seg_mask_age는 그 프레임에 쓴 세그 마스크의 원본 영상(카메라 0번 센서 시각)에서 화면 완성까지다.
+    - 앞 warmup 프레임은 통계에서 뺀다. 타임스탬프를 모르는 카메라(파일, sim)는 기록하지 않는다.
+    """
+
+    def __init__(self, camera_names: list[str], warmup: int = 0):
+        self.names = list(camera_names)
+        self.warmup = max(0, int(warmup))
+        self.frames = 0
+        self.per_cam: dict[str, list[float]] = {n: [] for n in self.names}
+        self.wait: dict[str, list[float]] = {n: [] for n in self.names}
+        self.oldest: list[float] = []
+        self.seg_mask_age: list[float] = []
+
+    def add(
+        self,
+        sensor_ns: list[int | None],
+        read_done_ns: list[int | None],
+        done_ns: int,
+        seg_mask_sensor_ns: int | None = None,
+    ) -> None:
+        """한 프레임 기록. sensor_ns, read_done_ns는 카메라 순서, done_ns는 대시보드 완성 시각."""
+        measured = self.frames >= self.warmup
+        self.frames += 1
+        if not measured:
+            return
+        lats = []
+        for name, ts, rd in zip(self.names, sensor_ns, read_done_ns):
+            if ts is None:
+                continue
+            lat = (done_ns - ts) / 1e6
+            self.per_cam[name].append(lat)
+            lats.append(lat)
+            if rd is not None:
+                self.wait[name].append((rd - ts) / 1e6)
+        if lats:
+            self.oldest.append(max(lats))
+        if seg_mask_sensor_ns is not None:
+            self.seg_mask_age.append((done_ns - seg_mask_sensor_ns) / 1e6)
+
+    def summary(self) -> dict:
+        return {
+            "frames_seen": self.frames,
+            "warmup": self.warmup,
+            "sensor_to_display_ms": {n: _stats(v) for n, v in self.per_cam.items()},
+            "sensor_to_display_oldest_ms": _stats(self.oldest),
+            "sensor_to_read_ms": {n: _stats(v) for n, v in self.wait.items()},
+            "seg_mask_sensor_to_display_ms": _stats(self.seg_mask_age),
+        }
