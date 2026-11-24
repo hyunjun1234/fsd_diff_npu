@@ -1,0 +1,51 @@
+# 1단계 기본 구성: 전방 + 후방 카메라 2대 (Raspberry Pi Camera Module 3 Wide 기준 예시값)
+# intrinsics는 scripts/calib_intrinsics.py, extrinsics는 scripts/calib_extrinsics.py 결과로 교체할 것.
+# 좌표계: 차량 X 전방, Y 좌측, Z 위 (m). 원점은 뒷바퀴 축 중앙 바닥.
+bev:
+  x_min: -15.0
+  x_max: 25.0
+  y_min: -12.0
+  y_max: 12.0
+  res: 0.05
+
+cameras:
+  - name: front
+    width: 768
+    height: 432
+    intrinsics:
+      model: pinhole          # 광각 렌즈 보정 결과가 fisheye면 fisheye
+      fx: 311.0
+      fy: 311.0
+      cx: 384.0
+      cy: 216.0
+      dist: [0.0, 0.0, 0.0, 0.0]
+    extrinsics:
+      position: [1.9, 0.0, 1.30]
+      yaw: 0.0
+      pitch: 12.0             # 아래로 숙인 각도
+      roll: 0.0
+    source: {type: picamera2, index: 0}
+
+  - name: rear
+    width: 768
+    height: 432
+    intrinsics:
+      model: pinhole
+      fx: 311.0
+      fy: 311.0
+      cx: 384.0
+      cy: 216.0
+      dist: [0.0, 0.0, 0.0, 0.0]
+    extrinsics:
+      position: [-0.9, 0.0, 1.10]
+      yaw: 180.0
+      pitch: 15.0
+      roll: 0.0
+    source: {type: picamera2, index: 1}
+
+npu:
+  det_hef: models/yolov8s_h8.hef          # Hailo Model Zoo (NMS 내장) 예: yolov8s / yolov8m
+  seg_hef: null                           # 선택: Cityscapes 시맨틱 세그 HEF (예: stdc1, fcn8_resnet_v1_18)
+  road_classes: [0]                       # Cityscapes trainId 0 = road
+  score_thr: 0.4
+  seg_every: 3

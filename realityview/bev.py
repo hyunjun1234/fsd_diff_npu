@@ -1,0 +1,180 @@
+"""BEV 격자, 카메라 영상/마스크의 IPM 합성, 검출 결과의 지면 투영."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import cv2
+import numpy as np
+
+from .camera_model import Camera
+from .types import Detection, GroundObject
+
+
+@dataclass
+class BevGrid:
+    """탑뷰 격자. 화면 위쪽이 차량 전방(+X), 왼쪽이 차량 좌측(+Y)."""
+
+    x_min: float = -15.0  # 후방 (m)
+    x_max: float = 25.0  # 전방
+    y_min: float = -12.0  # 우측
+    y_max: float = 12.0  # 좌측
+    res: float = 0.05  # m/px
+
+    @property
+    def width(self) -> int:
+        return int(round((self.y_max - self.y_min) / self.res))
+
+    @property
+    def height(self) -> int:
+        return int(round((self.x_max - self.x_min) / self.res))
+
+    def cell_centers(self) -> tuple[np.ndarray, np.ndarray]:
+        """각 픽셀 중심의 차량 좌표 X, Y (H, W)."""
+        rows = np.arange(self.height) + 0.5
+        cols = np.arange(self.width) + 0.5
+        X = self.x_max - rows * self.res
+        Y = self.y_max - cols * self.res
+        return np.meshgrid(X, Y, indexing="ij")
+
+    def to_pixel(self, xy: np.ndarray) -> np.ndarray:
+        """차량 좌표 (N,2: X,Y) → BEV 픽셀 (N,2: col,row), float."""
+        xy = np.asarray(xy, dtype=np.float64).reshape(-1, 2)
+        col = (self.y_max - xy[:, 1]) / self.res
+        row = (self.x_max - xy[:, 0]) / self.res
+        return np.stack([col, row], axis=1)
+
+
+class IpmCompositor:
+    """카메라마다 BEV 셀 → 이미지 픽셀 LUT를 미리 계산해 cv2.remap으로 합성한다.
+
+    Fast-BEV의 LUT 투영과 같은 아이디어를 지면 평면 한 장에만 적용한 것이다.
+    여러 카메라가 겹치는 셀은 카메라에 더 가까운(해상도가 높은) 쪽을 쓴다.
+    """
+
+    def __init__(self, cameras: list[Camera], grid: BevGrid, max_range: float = 30.0):
+        self.cameras = cameras
+        self.grid = grid
+        X, Y = grid.cell_centers()
+        pts = np.stack([X.ravel(), Y.ravel(), np.zeros(X.size)], axis=1)
+        H, W = grid.height, grid.width
+        self.maps: list[tuple[np.ndarray, np.ndarray]] = []
+        best_dist = np.full(H * W, np.inf)
+        self.owner = np.full(H * W, -1, dtype=np.int32)
+        for i, cam in enumerate(cameras):
+            uv, in_front = cam.project(pts)
+            inside = (
+                in_front
+                & (uv[:, 0] >= 0)
+                & (uv[:, 0] <= cam.width - 1)
+                & (uv[:, 1] >= 0)
+                & (uv[:, 1] <= cam.height - 1)
+            )
+            dist = np.linalg.norm(pts[:, :2] - cam.position[:2], axis=1)
+            inside &= dist <= max_range
+            take = inside & (dist < best_dist)
+            best_dist[take] = dist[take]
+            self.owner[take] = i
+            mx = np.where(inside, uv[:, 0], -1).astype(np.float32).reshape(H, W)
+            my = np.where(inside, uv[:, 1], -1).astype(np.float32).reshape(H, W)
+            self.maps.append(cv2.convertMaps(mx, my, cv2.CV_16SC2))
+        self.owner = self.owner.reshape(H, W)
+
+    def coverage(self) -> np.ndarray:
+        return self.owner >= 0
+
+    def warp(self, images: list[np.ndarray], interpolation: int = cv2.INTER_LINEAR) -> np.ndarray:
+        """카메라 영상(또는 마스크) 목록을 BEV 한 장으로 합성. 채널 수는 입력과 같다."""
+        if len(images) != len(self.cameras):
+            raise ValueError("images and cameras length mismatch")
+        out = None
+        for i, (img, (m1, m2)) in enumerate(zip(images, self.maps)):
+            if img is None:
+                continue
+            w = cv2.remap(img, m1, m2, interpolation, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+            if out is None:
+                out = np.zeros_like(w)
+            sel = self.owner == i
+            out[sel] = w[sel]
+        if out is None:
+            out = np.zeros((self.grid.height, self.grid.width, 3), np.uint8)
+        return out
+
+
+# 클래스별 기본 크기 (길이, 폭) m. 단안 박스 폭이 부정확할 때 표시용으로 쓴다.
+DEFAULT_SIZE = {
+    "car": (4.5, 1.9),
+    "truck": (8.0, 2.5),
+    "bus": (11.0, 2.6),
+    "motorcycle": (2.0, 0.8),
+    "bicycle": (1.8, 0.6),
+    "person": (0.6, 0.6),
+}
+
+
+def project_detections(
+    cam_index: int,
+    cam: Camera,
+    dets: list[Detection],
+    max_range: float = 40.0,
+) -> list[GroundObject]:
+    """박스 하단 중앙(접지점)을 지면으로 투영한다.
+
+    차량은 박스 하단이 가장 가까운 면이므로, 투영점을 카메라 시선 방향으로 차체 길이의 절반만큼
+    밀어 중심을 추정한다. 보행자/이륜차는 그대로 쓴다.
+    """
+    if not dets:
+        return []
+    bottoms = np.array([[(d.box[0] + d.box[2]) / 2.0, d.box[3]] for d in dets])
+    left = np.array([[d.box[0], d.box[3]] for d in dets])
+    right = np.array([[d.box[2], d.box[3]] for d in dets])
+    gc, vc = cam.pixel_to_ground(bottoms, max_range)
+    gl, vl = cam.pixel_to_ground(left, max_range)
+    gr, vr = cam.pixel_to_ground(right, max_range)
+    out = []
+    for k, d in enumerate(dets):
+        if not vc[k]:
+            continue
+        length, width = DEFAULT_SIZE.get(d.label, (1.0, 1.0))
+        xy = gc[k].copy()
+        ray = xy - cam.position[:2]
+        n = np.linalg.norm(ray)
+        if n > 1e-6 and length > 1.5:
+            xy = xy + ray / n * (length / 2.0)
+        if vl[k] and vr[k]:
+            w_meas = float(np.linalg.norm(gl[k] - gr[k]))
+            if 0.3 < w_meas < 4.0:
+                width = w_meas
+        out.append(
+            GroundObject(
+                label=d.label,
+                score=d.score,
+                xy=xy,
+                size=(length, width),
+                cam_index=cam_index,
+                distance=float(n),
+            )
+        )
+    return out
+
+
+def merge_cross_camera(objs: list[GroundObject], radius: float = 1.5) -> list[GroundObject]:
+    """카메라 경계에서 중복된 같은 객체를 합친다(점수 높은 순으로 흡수)."""
+    objs = sorted(objs, key=lambda o: -o.score)
+    kept: list[GroundObject] = []
+    for o in objs:
+        dup = False
+        for k in kept:
+            same_group = _group(k.label) == _group(o.label)
+            if same_group and np.linalg.norm(k.xy - o.xy) < radius and k.cam_index != o.cam_index:
+                # 거리가 가까운 카메라의 추정이 더 정확하므로 가중 평균
+                wk, wo = 1.0 / max(k.distance, 1.0), 1.0 / max(o.distance, 1.0)
+                k.xy = (k.xy * wk + o.xy * wo) / (wk + wo)
+                dup = True
+                break
+        if not dup:
+            kept.append(o)
+    return kept
+
+
+def _group(label: str) -> str:
+    return "vehicle" if label in ("car", "truck", "bus") else label
