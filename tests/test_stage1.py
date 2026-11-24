@@ -239,10 +239,11 @@ def test_two_cam_current_config_matches_sensors():
     front, rear = cams
     assert (front.name, front.source["index"], front.width, front.height) == ("front", 0, 768, 576)
     assert (rear.name, rear.source["index"], rear.width, rear.height) == ("rear", 1, 768, 432)
-    # 데이터시트 근사값에서 나온 수평 화각: ov5647 약 53.5도, imx708 약 68.5도
+    # 전방 ov5647은 130도 광각 렌즈라 어안(대각 130도 등거리 근사), 후방 imx708은 핀홀 수평 약 68.5도
+    assert front.model == "fisheye" and front.max_fov_deg == 140.0
+    assert front.K[0, 0] == pytest.approx(480 / np.radians(65), abs=0.1)
     hfov = lambda c: np.degrees(2 * np.arctan(c.width / 2 / c.K[0, 0]))  # noqa: E731
-    assert hfov(front) == pytest.approx(53.5, abs=0.2)
-    assert hfov(rear) == pytest.approx(68.5, abs=0.2)
+    assert rear.model == "pinhole" and hfov(rear) == pytest.approx(68.5, abs=0.2)
     # 센서 모드 비율이 출력 비율과 같아야 ISP가 가장자리를 잘라 내지 않는다
     for c in cams:
         sw, sh = c.source["sensor_size"]

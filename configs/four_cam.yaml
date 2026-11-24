@@ -1,6 +1,14 @@
-# 2단계 대비 4대 구성: 전/후/좌/우 (좌우는 사이드미러 위치, 아래로 크게 숙임) (Raspberry Pi Camera Module 3 Wide 기준 예시값)
+# 3단계 대비 4대 구성: 전방, 후방, 좌우 (Raspberry Pi Camera Module 3 Wide 기준 예시값)
 # intrinsics는 scripts/calib_intrinsics.py, extrinsics는 scripts/calib_extrinsics.py 결과로 교체할 것.
-# 좌표계: 차량 X 전방, Y 좌측, Z 위 (m). 원점은 뒷바퀴 축 중앙 바닥.
+# 좌표계: 차량 X 전방, Y 좌측, Z 위 (m). 원점은 뒷바퀴 축 중앙 바닥(docs/04_tesla_camera_layout.md와 같음).
+#
+# 카메라 자리는 테슬라 모델 Y에서 같은 역할의 카메라 자리로 둔다(two_cam_current.yaml과 같은 기준).
+# 구현 계획 2.3절이 4대를 "테슬라의 전방 와이드, 후방, 좌우 리피터 위치를 대신하는 최소 구성"으로 정했기 때문이다.
+#   전방 -> 전방 광각(앞유리 상단), 후방 -> 뒷번호판 위, 좌우 -> 앞펜더 방향지시등(리피터)
+# 좌표는 04 문서의 추정치, 각도 일부는 3D 도면(viz/tesla_camera_layout_3d.html)의 추정값이라 모두 실측 필요.
+# 펜더 카메라는 뒤쪽 옆을 보므로 차 앞쪽 옆은 이 4대로 덮이지 않는다(옆 1.2m 줄에서 x 0.9~3.7m,
+# 옆 3m 줄에서 x 2.5~4.2m. scripts/check_mount.py와 같은 IPM 계산). 테슬라는 이 자리를 B필러 카메라로 덮는다.
+# 예전 값(사이드미러 자리에서 옆을 향해 30도 숙임)은 바닥이 보이는 셀이 95.3%, 지금 값은 89.1%다.
 bev:
   x_min: -15.0
   x_max: 25.0
@@ -20,9 +28,9 @@ cameras:
       cy: 216.0
       dist: [0.0, 0.0, 0.0, 0.0]
     extrinsics:
-      position: [1.9, 0.0, 1.30]
-      yaw: 0.0
-      pitch: 12.0             # 아래로 숙인 각도
+      position: [1.80, -0.06, 1.45]   # 전방 광각 자리(04 문서 추정치)
+      yaw: 0.0                # 정면(04 문서)
+      pitch: 3.0              # 아래로 숙인 각도. 3D 도면의 추정값. 실측 필요
       roll: 0.0
     source: {type: picamera2, index: 0}
 
@@ -37,9 +45,9 @@ cameras:
       cy: 216.0
       dist: [0.0, 0.0, 0.0, 0.0]
     extrinsics:
-      position: [-0.9, 0.0, 1.10]
-      yaw: 180.0
-      pitch: 15.0
+      position: [-0.95, 0.0, 1.00]    # 뒷번호판 위(04 문서 추정치)
+      yaw: 180.0              # 뒤쪽
+      pitch: 20.0             # 04 문서의 값(문서도 추정). 실측 필요
       roll: 0.0
     source: {type: picamera2, index: 1}
 
@@ -54,9 +62,9 @@ cameras:
       cy: 216.0
       dist: [0.0, 0.0, 0.0, 0.0]
     extrinsics:
-      position: [2.0, 0.95, 1.05]
-      yaw: 90.0
-      pitch: 30.0
+      position: [2.25, 0.97, 0.92]    # 왼쪽 앞펜더 리피터(04 문서 추정치)
+      yaw: 135.0              # 뒤쪽으로 약 45도 돌린 왼쪽 뒤(04 문서, 출처 S4)
+      pitch: 5.0              # 3D 도면의 추정값. 예전 값(옆을 향해 30도 숙임)보다 차 바로 옆 바닥이 덜 보인다. 실측 필요
       roll: 0.0
     source: {type: opencv, uri: 0}
 
@@ -71,9 +79,9 @@ cameras:
       cy: 216.0
       dist: [0.0, 0.0, 0.0, 0.0]
     extrinsics:
-      position: [2.0, -0.95, 1.05]
-      yaw: -90.0
-      pitch: 30.0
+      position: [2.25, -0.97, 0.92]   # 오른쪽 앞펜더 리피터(04 문서 추정치)
+      yaw: -135.0             # 오른쪽 뒤(04 문서, 출처 S4)
+      pitch: 5.0              # 3D 도면의 추정값. 실측 필요
       roll: 0.0
     source: {type: opencv, uri: 1}
 

@@ -44,10 +44,14 @@ def test_model_config_loads_small_grid_and_fisheye_front():
     assert [c.name for c in cams] == ["front", "rear"]
     assert cams[0].model == "fisheye" and cams[1].model == "pinhole"
     assert cams[0].max_fov_deg == 140.0
-    assert 0.15 <= cams[0].position[2] <= 0.30  # 모형 카메라 높이(실측 필요)
-    assert grid.res <= 0.02 and grid.x_max - grid.x_min <= 4.0 + 1e-9
+    # 테슬라 배치를 1/10로 줄인 자리: 전방 높이 14.5cm, 후방 10cm
+    assert cfg["scene"]["scale"] == pytest.approx(0.1)
+    np.testing.assert_allclose(cams[0].position, [0.18, -0.006, 0.145], atol=1e-9)
+    np.testing.assert_allclose(cams[1].position, [-0.095, 0.0, 0.10], atol=1e-9)
+    # BEV: 실차 범위(앞 25m, 뒤 15m, 좌우 12m)와 셀 10cm를 1/10로 줄임
+    assert (grid.x_min, grid.x_max, grid.y_min, grid.y_max) == (-1.5, 2.5, -1.2, 1.2)
+    assert grid.res == pytest.approx(0.01)
     assert (grid.height, grid.width) == (400, 240)
-    assert cfg["scene"]["scale"] == pytest.approx(0.15)
     # 근사 초점거리: 대각 130도 등거리 어안
     assert cams[0].K[0, 0] == pytest.approx(fisheye_f_from_fov(768, 576, 130.0, diagonal=True), abs=0.1)
 
@@ -161,7 +165,7 @@ def test_find_corners_on_rendered_board():
 def test_extrinsics_from_floor_board_recovers_pose():
     cams, _, _ = load_config(MODEL_CFG)
     truth = cams[0]
-    XY = floor_board_xy(9, 6, 0.020, (0.40, 0.08), -90.0)
+    XY = floor_board_xy(9, 6, 0.020, (0.50, 0.08), -90.0)
     assert np.allclose(XY[1] - XY[0], [0.0, -0.020])  # 보드 가로 = 차량 -Y 방향
     uv, ok = truth.project(np.hstack([XY, np.zeros((len(XY), 1))]))
     assert ok.all()
@@ -247,7 +251,13 @@ def _render_floor_board(cam, cols, rows, sq, origin, yaw_deg):
     return img.reshape(cam.height, cam.width)
 
 
-@pytest.mark.parametrize("which,origin,yaw", [(0, (0.40, 0.08), -90.0), (0, (0.35, -0.10), 0.0), (1, (-0.55, -0.08), 90.0)])
+# 보드 자리는 docs/phase1_model_rig_calibration.md 5장의 예시와 같다. 전방 카메라가 높이 14.5cm에서 거의
+# 수평(3도)이라 보드가 카메라 앞 약 15cm보다 가까우면 화면 아래로 빠진다. 반대로 0번 코너가 원점에서
+# 0.5m를 넘으면 보드가 납작하게 찍혀 코너 순서가 틀리게 나오는 자리가 생긴다(합성 영상으로 확인).
+# 맥(OpenCV 4.13)과 파이(4.10)에서 코너를 찾는 자리가 조금 달라서 둘 다 되는 자리만 쓴다.
+# 전방 보드는 검은 칸이 모형 앞범퍼 자리(x 0.378)보다 앞에 오는 자리만 쓴다.
+@pytest.mark.parametrize("which,origin,yaw", [(0, (0.50, 0.08), -90.0), (0, (0.40, 0.0), 0.0),
+                                              (1, (-0.40, -0.08), 90.0), (1, (-0.30, 0.0), 180.0)])
 def test_floor_board_corner_order_matches_detector(which, origin, yaw):
     # 진짜 코너 검출기가 돌려주는 순서와 floor_board_xy의 순서가 같아야 외부 보정이 맞는다
     cams, _, _ = load_config(MODEL_CFG)
