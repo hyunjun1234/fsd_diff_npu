@@ -276,6 +276,8 @@ class RealityViewPipeline:
         # 두 NPU 동시 실행 옵션: 검출은 backend(예: Hailo), 세그는 seg_backend(예: DX-M1)
         self.seg_backend = seg_backend
         self.seg_every = max(1, int(seg_every))
+        # 과열 대응(--thermal)이 경고 단계에서 True로 바꾸면 세그 스레드에 새 영상을 넘기지 않는다(지난 마스크 유지)
+        self.seg_paused = False
         self._seg = _SegWorker(seg_backend.segment, self.timer) if seg_backend is not None else None
         self._frame_idx = 0
         # 차선과 신호등(옵션)
@@ -365,7 +367,7 @@ class RealityViewPipeline:
         self._frame_idx += 1
 
         # 0) 별도 스레드 세그: N 프레임마다 영상을 넘긴다. 아래 검출과 같은 시간에 다른 NPU에서 돈다
-        if self._seg is not None and idx % self.seg_every == 0:
+        if self._seg is not None and not self.seg_paused and idx % self.seg_every == 0:
             self._seg.submit(idx, frames)
 
         # 1) 검출(+세그). 전처리, NPU 추론, NMS 파싱의 세부 시간은 백엔드가 같은 타이머에 적는다

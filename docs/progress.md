@@ -33,6 +33,8 @@
 
 3D 화면에 차선과 신호등 색을 더했습니다(`--lanes`, `--traffic-lights`). 파이에 차선 HEF가 없어 탑뷰 바닥 영상에서 흰색과 노란색 차선을 찾는 고전 방식(파이 CPU 8.1ms)을 쓰고, 신호등은 YOLOv8s의 traffic light 박스를 HSV로 판정합니다. 시뮬레이션에서 차선 곡선 오차 평균 1.3~3.0cm, 신호등 색 정확도 0.91~1.00이었고, 파이 3D 화면에 둘을 켜고 19.7 FPS입니다. 실제 도로 정확도는 주행 녹화 뒤 확인합니다.
 
+시동 연동과 과열 대응도 준비했습니다. `--thermal`을 켜면 Hailo, DX-M1, SoC 온도에 따라 세그와 깊이 주기를 늘리고, DX-M1을 멈추고, 끝으로 종료하는 단계를 히스테리시스와 함께 밟습니다. 부팅 후 자동 녹화와 데모용 systemd 사용자 서비스는 `deploy/systemd/`에 있고, ACC 신호(GPIO)나 SIGTERM을 받으면 세그먼트를 닫고 동기화한 뒤 끝납니다. 설치와 배선은 [차량 전원과 자동 시작 문서](vehicle_power_and_autostart.md)에 있습니다.
+
 ## 장비 구성
 
 라즈베리파이 5(Debian 13, 64비트)에 Seeed 듀얼 M.2 HAT로 Hailo-8과 DX-M1 4GB를 함께 달았고, 두 NPU 모두 PCIe Gen3 x1로 인식됩니다. 런타임은 HailoRT 4.23.0, DXRT 3.4.2이고, `dx_engine`은 파이 저장소의 `.venv`에만 있습니다.
@@ -125,5 +127,6 @@ cd ~/Desktop/App/fsd_diff_npu && python ~/Desktop/App/fsd_agent.py --task-file d
 | 13 학습 파이프라인 | 11.32달러 |
 | 14 카메라 4대 지원 | 7.76달러 |
 | 15 차선과 신호등 | 8.76달러 |
+| 16 자동 시작과 과열 대응 | 4.29달러 |
 
-합계는 104.09달러에 끊긴 실행 한 번이 더해집니다. 실제 금액은 Console의 Cost 페이지가 기준입니다.
+합계는 108.38달러에 끊긴 실행 한 번이 더해집니다. 실제 금액은 Console의 Cost 페이지가 기준입니다.

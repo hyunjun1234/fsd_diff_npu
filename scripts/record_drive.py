@@ -10,7 +10,9 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 from realityview.config import load_config  # noqa: E402
-from realityview.drive_rec import DriveRecorder, list_drives  # noqa: E402
+from realityview.drive_rec import DriveRecorder, list_drives, write_json_atomic  # noqa: E402
+from realityview.power import add_power_args, finish, make_watcher  # noqa: E402
+from realityview.thermal import CRITICAL, EXIT_THERMAL, add_thermal_args, config_from_args  # noqa: E402
 
 # 주행 녹화: NPU 추론 없이 설정 파일의 카메라 전부를 세그먼트 단위로 저장한다.
 # 폴더 구조와 파일 형식은 realityview/drive_rec.py 맨 위 설명과 docs/drive_recording.md 를 본다.
@@ -41,6 +43,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--quality", type=int, default=85, help="JPEG 품질(1~100). 기본 85")
     ap.add_argument("--cam-fps", type=float, default=None, help="Picamera2 프레임레이트를 이 값으로 덮어씀. 기본은 설정값")
     ap.add_argument("--list", action="store_true", help="녹화하지 않고 --out 아래 회차 목록과 용량만 보여 줌")
+    # 녹화는 NPU를 쓰지 않으므로 위험 단계 기본 조치는 continue(기록만 남기고 녹화 유지)
+    add_thermal_args(ap, critical_default="continue")
+    add_power_args(ap)
     return ap
 
 
@@ -98,15 +103,55 @@ def main() -> int:
         signal.signal(signal.SIGINT, on_signal)
         signal.signal(signal.SIGTERM, on_signal)
 
+        # ---- 안전 종료(옵션): 신호 파일이나 ACC GPIO 가 꺼짐을 알리면 녹화를 멈춘다 ----
+        power_loss = {"reason": None}
+
+        def on_power_loss(reason):
+            power_loss["reason"] = reason
+            rec.request_stop(f"power_loss:{reason}")
+
+        watcher = make_watcher(args, on_power_loss)
+
         rec.start()
+
+        # ---- 과열 감시(옵션): 녹화는 NPU를 쓰지 않으므로 기록이 주 목적. --thermal-critical exit 이면 멈춘다 ----
+        # 회차 폴더가 rec.start()에서 생기므로 그 뒤에 만든다. csv 기본 위치는 회차 폴더의 thermal.csv
+        monitor = None
+        thermal_exit = {"hit": False}
+        if args.thermal:
+            from realityview.thermal import ThermalMonitor, default_readers
+
+            def on_change(st):
+                if st.level >= CRITICAL and args.thermal_critical == "exit":
+                    thermal_exit["hit"] = True
+                    rec.request_stop(f"thermal_critical:{st.cause}")
+
+            monitor = ThermalMonitor(
+                config_from_args(args), default_readers(hailo_standalone=True),
+                csv_path=args.thermal_csv or os.path.join(rec.drive_dir, "thermal.csv"), on_change=on_change,
+            ).start()
+        if watcher is not None:
+            watcher.start()
         print(f"녹화 시작: {rec.drive_dir} 카메라 {[c.name for c in cams]} 세그먼트 {args.segment:g}초", flush=True)
         try:
             rec.run_until_stopped()
         finally:
             meta = rec.close()
+            if watcher is not None:
+                watcher.close()
+            if monitor is not None:
+                meta["thermal"] = monitor.close()
+            if watcher is not None or monitor is not None:
+                write_json_atomic(os.path.join(rec.drive_dir, "drive.json"), meta)
+            if watcher is not None or args.power_loss_cmd or str(rec.stop_reason).startswith("signal:"):
+                # 녹화 파일은 close()에서 이미 fsync 했다. 나머지(로그, 메타데이터)까지 디스크로 내린다.
+                # SIGTERM(systemd 정지, 전원 장치)으로 끝날 때도 한다. 전원 꺼짐 뒤 명령은 GPIO나 신호 파일일 때만 부른다
+                meta["finish"] = finish(power_loss["reason"], args.power_loss_cmd or None)
         summary = {k: meta.get(k) for k in ("drive", "elapsed_s", "stop_reason", "segments_closed", "totals")}
         print(json.dumps(summary, ensure_ascii=False), flush=True)
         errors = [t for t in meta.get("totals") or [] if t.get("error")]
+        if thermal_exit["hit"]:
+            return EXIT_THERMAL
         return 1 if errors else 0
     finally:
         for s in sources:

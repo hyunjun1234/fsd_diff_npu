@@ -6,6 +6,7 @@ import dataclasses
 import json
 import os
 import sys
+import threading
 import time
 
 import cv2
@@ -23,6 +24,8 @@ from realityview.profiling import (  # noqa: E402
     format_table,
     read_pi_health,
 )
+from realityview.power import add_power_args, finish, make_watcher  # noqa: E402
+from realityview.thermal import EXIT_THERMAL, add_thermal_args, config_from_args  # noqa: E402
 
 # 리얼리티 뷰 1단계 데모 실행.
 #
@@ -216,6 +219,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--sim-curvature", type=float, default=0.0, help="sim 도로 곡률(1/m). 예: 0.006. 기본 0(곧은 도로)")
     ap.add_argument("--sim-lights", action="store_true", help="sim 장면 앞쪽에 세로형, 가로형 신호등을 띄움")
     ap.add_argument("--skew-comp", action="store_true", help="묶음의 카메라별 시각 차이만큼 추적기에 넣는 위치를 트랙 속도로 옮김(--sync 필요)")
+    # ---- 과열 대응과 안전 종료(기본 꺼짐, realityview/thermal.py, realityview/power.py) ----
+    add_thermal_args(ap, critical_default="exit")
+    add_power_args(ap)
     return ap
 
 
@@ -547,6 +553,12 @@ def main() -> None:
             backend.close()
             raise
         backend = shadow
+    # ---- 과열 대응(옵션): 검출 횟수 상한과 멈춤을 걸 수 있게 맨 바깥에서 백엔드를 감싼다 ----
+    gate = None
+    if args.thermal:
+        from realityview.thermal import ThermalGateBackend
+
+        backend = gate = ThermalGateBackend(backend)
     if det_round is not None or shadow is not None:
         print(f"검출 모델 회차: 기본 {det_round} ({args.backend})"
               + (f", 섀도 {shadow.shadow_round} ({shadow.shadow_path})" if shadow is not None else ""), flush=True)
@@ -620,9 +632,14 @@ def main() -> None:
         if shadow is None:
             print("트리거 클립: 두 NPU 불일치(npu_mismatch) 트리거는 --shadow 를 같이 줄 때만 동작합니다", flush=True)
     health = None
+    # Hailo 백엔드면 칩 온도를 읽는 함수. 건강 기록과 과열 감시가 같은 장치를 읽으므로 락으로 한 번에 하나씩 읽는다
+    temp_fn = getattr(backend, "chip_temperature", None) if world is None else None
+    if temp_fn is not None:
+        from realityview.thermal import locked
+
+        temp_fn = locked(temp_fn, threading.Lock())
     if args.health_csv:
         # Hailo 백엔드면 칩 온도 열을 더한다(방열 없이 오래 돌리면 Hailo-8이 먼저 뜨거워진다)
-        temp_fn = getattr(backend, "chip_temperature", None) if world is None else None
         health = HealthLogger(
             args.health_csv,
             args.health_interval,
@@ -631,6 +648,23 @@ def main() -> None:
         )
     if health is not None:
         health.start()
+
+    # ---- 과열 감시(옵션): 스레드는 온도만 읽고, 조치는 아래 메인 루프에서 controller.poll()로 적용한다 ----
+    monitor = controller = None
+    thermal_exit = False
+    if args.thermal:
+        from realityview.thermal import ThermalController, ThermalMonitor, default_readers, draw_label
+
+        # Hailo 백엔드가 아니면 Hailo 장치를 잠깐 열어 읽는다(다른 프로그램이 쓰는 중이면 None)
+        readers = default_readers(hailo_fn=temp_fn, dxm1=True, hailo_standalone=temp_fn is None and world is None)
+        monitor = ThermalMonitor(config_from_args(args), readers, csv_path=args.thermal_csv).start()
+        controller = ThermalController(monitor, pipe, gate, det_on_dxm1=args.backend == "dxm1")
+
+    # ---- 안전 종료(옵션): 신호 파일이나 ACC GPIO 가 꺼짐을 알리면 루프를 끝낸다 ----
+    power_loss = {"reason": None}
+    watcher = make_watcher(args, lambda reason: power_loss.update(reason=reason))
+    if watcher is not None:
+        watcher.start()
     t_first = last = time.perf_counter()
     try:
         while args.frames == 0 or n < args.frames:
@@ -672,8 +706,20 @@ def main() -> None:
                 # gt 백엔드: 각 카메라 영상이 파일의 몇 번째 프레임인지 알려 준다
                 meta = synced.last.meta if synced is not None else [getattr(s, "recorded_frame", None) for s in sources]
                 backend.set_frame_meta(meta)
+            # 1-1) 과열 단계가 바뀌었으면 주기, DX-M1 멈춤, 검출 상한을 이번 프레임부터 적용한다
+            if controller is not None:
+                act = controller.poll()
+                if act.exit:
+                    print(f"과열 위험 단계({monitor.state().cause}도)라 깨끗하게 끝냅니다", flush=True)
+                    thermal_exit = True
+                    break
+            if power_loss["reason"] is not None:
+                print(f"전원 꺼짐 신호({power_loss['reason']})를 받아 끝냅니다", flush=True)
+                break
             # 2) 검출부터 렌더링까지
             out = pipe.step(frames, dt, offsets)
+            if monitor is not None:
+                draw_label(out.dashboard, monitor.state())  # 화면 오른쪽 위에 과열 단계 표시
             done_ns = time.monotonic_ns()  # 대시보드 완성 시각(녹화, 화면 표시 전)
             # 지연 기록(--profile이고 센서 타임스탬프가 있을 때만)
             if latency is not None:
@@ -737,6 +783,12 @@ def main() -> None:
             loop["measured_renders"] = pipe.render_count - renders0
         if health is not None:
             health.close()
+        if watcher is not None:
+            watcher.close()
+        if monitor is not None:
+            print(f"thermal_summary={json.dumps(monitor.close(), ensure_ascii=False)}", flush=True)
+            if gate is not None:
+                print(f"thermal_gate=ran {gate.ran} skipped {gate.skipped}", flush=True)
         if clipper is not None:
             # 모으던 클립까지 저장하고 쓰기 스레드를 끝낸다
             trig_stats = clipper.close()
@@ -782,6 +834,11 @@ def main() -> None:
         pipe.close()
         if not args.headless:
             cv2.destroyAllWindows()
+    # ---- 마무리: 안전 종료 옵션이 있으면 디스크 동기화(전원 꺼짐이면 --power-loss-cmd 도), 과열 종료는 전용 종료 코드 ----
+    if watcher is not None or args.power_loss_cmd:
+        finish(power_loss["reason"], args.power_loss_cmd or None)
+    if thermal_exit:
+        sys.exit(EXIT_THERMAL)  # systemd 가 다시 띄우지 않게(RestartPreventExitStatus=75)
 
 
 if __name__ == "__main__":

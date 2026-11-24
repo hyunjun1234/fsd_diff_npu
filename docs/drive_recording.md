@@ -52,7 +52,7 @@ timeout -s TERM -k 15 3700 python3 scripts/record_drive.py --config configs/two_
 | `--quality` | 85 | JPEG 품질 |
 | `--cam-fps` | 설정값 | 카메라 프레임레이트 덮어쓰기 |
 
-Ctrl+C(SIGINT)나 SIGTERM을 받으면 지금 세그먼트를 닫고 `drive.json`에 끝난 이유를 적은 뒤 끝납니다. ACC가 꺼질 때 전원 장치나 systemd가 SIGTERM을 보내고 몇 초 기다려 주게 설정하면 마지막 세그먼트까지 깨끗하게 남습니다. 디스크 남은 공간은 2초마다 보고, 시작할 때부터 모자라면 한 장도 쓰지 않고 끝냅니다.
+Ctrl+C(SIGINT)나 SIGTERM을 받으면 지금 세그먼트를 닫고 `drive.json`에 끝난 이유를 적은 뒤 끝납니다. ACC가 꺼질 때 전원 장치나 systemd가 SIGTERM을 보내고 몇 초 기다려 주게 설정하면 마지막 세그먼트까지 깨끗하게 남습니다. 부팅 때 자동 시작, ACC GPIO와 신호 파일로 끝내기(`--acc-gpio`, `--stop-file`), 과열 감시(`--thermal`)는 docs/vehicle_power_and_autostart.md 를 봅니다. 디스크 남은 공간은 2초마다 보고, 시작할 때부터 모자라면 한 장도 쓰지 않고 끝냅니다.
 
 카메라마다 읽기 스레드와 쓰기 스레드를 따로 둡니다. 디스크 쓰기가 잠깐 멈춰도 읽기 스레드는 큐(카메라당 60장)에 넣고 계속 읽으므로 프레임을 놓치지 않습니다. 큐가 가득 차서 버린 수는 `status.csv`의 `queue_drops`에, 센서 시각 간격으로 추정한 누락 수는 `gaps`에 남습니다.
 
