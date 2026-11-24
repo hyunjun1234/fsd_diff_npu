@@ -167,7 +167,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--tracker",
         choices=["basic", "robust"],
         default="basic",
-        help="basic: 예전 추적기(기본), robust: 먼 물체 ID 쪼개짐을 고친 판(out/measure/11_tracker_latency.md)",
+        help="basic: 예전 추적기(기본), robust: 먼 물체 ID 쪼개짐과 빠른 물체를 고친 칼만 필터 판(out/measure/17_tracking_fast.md)",
+    )
+    ap.add_argument(
+        "--vehicle-center",
+        choices=["ray", "box"],
+        default="ray",
+        help="차 중심 추정. ray: 시선 방향으로 길이 절반 밀기(기본, 예전과 같음), box: 보는 방향에 따라 길이나 폭 절반",
     )
     # ---- 저장 이미지 재생(기본 꺼짐) ----
     ap.add_argument(
@@ -205,6 +211,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ap.add_argument("--cam-flush", action="store_true", help="read()마다 부른 뒤에 노출을 시작한 프레임만 받음")
     # ---- 카메라 간 시간 맞춤(기본 꺼짐 = 예전처럼 카메라 순서대로 한 장씩 읽어 그대로 묶음) ----
+    ap.add_argument("--cam-retry", type=float, default=0.0,
+                    help="실시간 카메라가 응답하지 않으면 그 칸을 NO SIGNAL로 두고 이 간격(초)으로 다시 열기. 0이면 끔(기본, 예전처럼 끝냄)")
     ap.add_argument("--sync", action="store_true", help="카메라별 시각으로 기준 카메라에 가장 가까운 프레임끼리 묶음(FrameSyncer)")
     ap.add_argument("--sync-ref", type=int, default=0, help="기준 카메라 번호(설정 순서). 기본 0")
     ap.add_argument("--sync-tol-ms", type=float, default=25.0, help="묶음 허용 오차(ms). 기본 25")
@@ -480,7 +488,16 @@ def main() -> None:
                 else:
                     # --cam-* 옵션은 CSI 카메라(picamera2)에만 덮어쓴다
                     is_pi = c.source.get("type") == "picamera2"
-                    sources.append(open_source(c, cam_ov if (cam_ov and is_pi) else None, hubs=hubs))
+                    ov = cam_ov if (cam_ov and is_pi) else None
+                    if args.cam_retry > 0 and c.source.get("type") != "quad":
+                        # 끊김 복구(옵션): 응답이 없으면 신호 없음으로 두고 cam_retry초마다 다시 연다.
+                        # 쿼드 키트 칸은 장치 하나를 여러 칸이 나눠 써서 칸 하나만 다시 열 수 없으므로 감싸지 않는다
+                        from realityview.multicam import ReconnectingSource
+
+                        sources.append(ReconnectingSource(lambda c=c, ov=ov: open_source(c, ov), name=c.name,
+                                                          retry_s=args.cam_retry))
+                    else:
+                        sources.append(open_source(c, ov, hubs=hubs))
         except Exception:
             # 두 번째 카메라에서 실패해도 먼저 연 카메라는 놓아 준다
             for s in sources:
@@ -577,6 +594,7 @@ def main() -> None:
         view3d=make_view3d_config(args, cfg) if args.view != "bev" else None,
         ground_every=args.view3d_ground_every,
         tracker=args.tracker,
+        vehicle_center=args.vehicle_center,
         skew_comp=args.skew_comp,
         lanes=LaneConfig() if args.lanes else None,
         lanes_every=args.lanes_every,
@@ -686,9 +704,17 @@ def main() -> None:
                         frames = [None]
                 else:
                     frames, read_done = [], []
-                    for s in sources:
-                        frames.append(s.read())
+                    for c, s in zip(cams, sources):
+                        f = s.read()
+                        if f is None and getattr(s, "signal_lost", False):
+                            # 끊긴 카메라(--cam-retry): NO SIGNAL 칸을 넣고 나머지 카메라로 계속한다
+                            from realityview.multicam import no_signal_frame
+
+                            f = no_signal_frame(c.width, c.height, c.name)
+                        frames.append(f)
                         read_done.append(time.monotonic_ns())  # 지연 측정용: 영상을 손에 넣은 시각
+                    if sources and all(getattr(s, "signal_lost", False) for s in sources):
+                        time.sleep(0.05)  # 모든 카메라가 끊기면 빈 루프가 CPU를 태우지 않게 쉰다
             if any(f is None for f in frames):
                 break
             offsets = None
@@ -798,6 +824,10 @@ def main() -> None:
             synced.syncer.close()
             sync_summary = synced.syncer.summary()
             print(f"sync_summary={json.dumps(sync_summary, ensure_ascii=False)}", flush=True)
+        cam_retry = [s.stats() for s in sources if hasattr(s, "stats") and hasattr(s, "signal_lost")]
+        if cam_retry:
+            # 끊김 복구 기록: 카메라별 끊긴 횟수, 다시 열기 시도와 성공
+            print(f"cam_retry={json.dumps(cam_retry, ensure_ascii=False)}", flush=True)
         if shadow is not None:
             print(f"shadow_summary={json.dumps(shadow.summary(), ensure_ascii=False)}", flush=True)
         if recorder is not None:

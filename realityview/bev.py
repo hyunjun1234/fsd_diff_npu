@@ -137,6 +137,7 @@ def project_detections(
     dets: list[Detection],
     max_range: float = 40.0,
     scale: float = 1.0,
+    vehicle_center: str = "ray",
 ) -> list[GroundObject]:
     """박스 하단 중앙(접지점)을 지면으로 투영한다.
 
@@ -144,7 +145,13 @@ def project_detections(
     밀어 중심을 추정한다. 보행자/이륜차는 그대로 쓴다.
     scale: 장면 축척. 책상 위 모형(장난감 차)이면 실제 차에 대한 모형 크기 비율(예: 0.15)을 주어
            기본 크기와 거리 문턱값을 같은 비율로 줄인다. 1.0이면 예전과 같다.
+    vehicle_center: 접지점에서 차 중심까지 미는 거리를 정하는 방식.
+      "ray"(기본, 예전과 같음): 시선 방향 어느 쪽에서 보든 차 길이의 절반만큼 민다.
+      "box": 차가 도로와 나란히(차량 X축 방향) 서 있다고 보고, 카메라 광축 방향과 차 상자 크기로 중심을 구한다
+             (box_center). 뒤쪽 옆을 보는 측면 카메라에서 차 중심이 앞으로 1m 넘게 치우치던 것을 줄인다.
     """
+    if vehicle_center not in ("ray", "box"):
+        raise ValueError(f"vehicle_center는 ray 또는 box여야 합니다: {vehicle_center}")
     if not dets:
         return []
     bottoms = np.array([[(d.box[0] + d.box[2]) / 2.0, d.box[3]] for d in dets])
@@ -153,6 +160,7 @@ def project_detections(
     gc, vc = cam.pixel_to_ground(bottoms, max_range)
     gl, vl = cam.pixel_to_ground(left, max_range)
     gr, vr = cam.pixel_to_ground(right, max_range)
+    axis = camera_ground_axis(cam) if vehicle_center == "box" else None
     out = []
     for k, d in enumerate(dets):
         if not vc[k]:
@@ -163,7 +171,11 @@ def project_detections(
         ray = xy - cam.position[:2]
         n = np.linalg.norm(ray)
         if n > 1e-6 and length > 1.5 * scale:
-            xy = xy + ray / n * (length / 2.0)
+            u = ray / n
+            if vehicle_center == "box" and axis is not None:
+                xy = box_center(xy, cam.position[:2], axis, length, width)
+            else:
+                xy = xy + u * (length / 2.0)
         if vl[k] and vr[k]:
             w_meas = float(np.linalg.norm(gl[k] - gr[k]))
             if 0.3 * scale < w_meas < 4.0 * scale:
@@ -179,6 +191,39 @@ def project_detections(
             )
         )
     return out
+
+
+def box_center(g: np.ndarray, cam_xy: np.ndarray, axis: np.ndarray, length: float, width: float) -> np.ndarray:
+    """차 상자(차량 X축과 나란한 길이 x 폭)의 중심을 박스 아래 끝 투영점 g에서 추정한다.
+
+    박스 아래 끝(영상에서 가장 낮은 줄)은 차 바닥 네모 중 카메라 앞쪽 깊이(광축 방향 거리)가 가장 작은 점이다.
+    그래서 g는 "가장 가까운 깊이" 선 위에 있고, 중심은 그보다 깊이가
+        h = 길이/2 x |광축_x| + 폭/2 x |광축_y|
+    만큼 더 깊다(네모를 광축 방향으로 본 반폭). 중심의 방위는 박스 가운데 열, 곧 카메라에서 g로 가는 시선이다.
+    그래서 중심 = 카메라 + 시선 x t, t = (광축 . (g - 카메라) + h) / (광축 . 시선).
+    전방 카메라가 정면의 차를 보면 h = 길이/2가 되어 예전 방식과 같고, 뒤쪽 옆을 보는 측면 카메라에서는
+    차를 비스듬히 보는 만큼 덜 밀거나 더 민다.
+    g, cam_xy: 지면 좌표(m). axis: 카메라 광축을 지면에 내린 단위 벡터.
+    """
+    ray = g - cam_xy
+    n = float(np.linalg.norm(ray))
+    if n < 1e-6:
+        return g
+    ray = ray / n
+    cos = float(axis @ ray)
+    if cos < 0.2:  # 시선이 광축과 거의 수직이면(화면 가장자리) 깊이로 풀기 어렵다. 예전처럼 길이 절반만 민다
+        return g + ray * (length / 2.0)
+    h = length / 2.0 * abs(float(axis[0])) + width / 2.0 * abs(float(axis[1]))
+    t = (float(axis @ (g - cam_xy)) + h) / cos
+    return cam_xy + ray * t
+
+
+def camera_ground_axis(cam: Camera) -> np.ndarray | None:
+    """카메라 광축(카메라 좌표 +Z)을 차량 좌표 지면에 내린 단위 벡터. 거의 수직으로 내려다보면 None."""
+    a = np.asarray(cam.R_vc, dtype=np.float64) @ np.array([0.0, 0.0, 1.0])
+    v = a[:2]
+    n = float(np.linalg.norm(v))
+    return v / n if n > 1e-3 else None
 
 
 def merge_cross_camera(objs: list[GroundObject], radius: float = 1.5, scale: float = 1.0) -> list[GroundObject]:

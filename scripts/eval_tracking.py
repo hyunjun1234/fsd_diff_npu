@@ -150,12 +150,14 @@ def visible_gt(world: SimWorld) -> list[tuple]:
     return out
 
 
-def run_sim(config: str, fps: float, frames: int, seed: int, tracker: str, warmup: int = 0) -> TrackingMetrics:
+def run_sim(config: str, fps: float, frames: int, seed: int, tracker: str, warmup: int = 0,
+            vehicle_center: str = "ray") -> TrackingMetrics:
     cams, grid, cfg = load_config(config)
     scale = float((cfg.get("scene") or {}).get("scale", 1.0))
     world = SimWorld(cams)
     pipe = RealityViewPipeline(
-        cams, SimBackend(world, seed=seed), grid, show_ground=False, show_cameras=False, scale=scale, tracker=tracker
+        cams, SimBackend(world, seed=seed), grid, show_ground=False, show_cameras=False, scale=scale, tracker=tracker,
+        vehicle_center=vehicle_center,
     )
     m = TrackingMetrics(scale)
     dt = 1.0 / fps
@@ -205,7 +207,7 @@ class _GtStub:
 
 def run_sim_sync(config: str, fps: float, frames: int, seed: int, tracker: str, warmup: int, skew_ms: list[float],
                  drop: list[float], jitter_ms: list[float], tol_ms: float, on_miss: str, skew_comp: bool,
-                 oncoming: bool = False):
+                 oncoming: bool = False, vehicle_center: str = "ray"):
     """카메라 k를 n/fps + skew_ms[k] 시각에 찍고(흔들림, 누락 포함) FrameSyncer로 묶어 추적을 평가한다.
 
     정답 위치는 기준 카메라(0번) 시각의 물체 위치다. 그래서 어긋난 카메라의 물체는 그만큼 다른 자리에서
@@ -237,7 +239,8 @@ def run_sim_sync(config: str, fps: float, frames: int, seed: int, tracker: str, 
     reader = SyncedSources(streams, syncer)
     stub = _GtStub(n)
     pipe = RealityViewPipeline(cams, SimBackend(stub, seed=seed), grid, show_ground=False, show_cameras=False,
-                               scale=scale, tracker=tracker, skew_comp=skew_comp)
+                               scale=scale, tracker=tracker, skew_comp=skew_comp,
+                               vehicle_center=vehicle_center)
     m = TrackingMetrics(scale)
     prev_ns, fi = None, 0
     try:
@@ -279,6 +282,8 @@ def main() -> None:
     ap.add_argument("--sync-miss", choices=["hold", "blank"], default="hold", help="허용 오차를 넘으면 이전 프레임(hold) 또는 빈 칸(blank)")
     ap.add_argument("--skew-comp", action="store_true", help="묶음의 시각 차이만큼 물체 위치를 트랙 속도로 옮김")
     ap.add_argument("--oncoming", action="store_true", help="시각 어긋남 평가에 마주 오는 차(상대 25 m/s) 한 대를 더함")
+    ap.add_argument("--vehicle-center", choices=["ray", "box"], default="ray",
+                    help="차 중심 추정. ray: 시선 방향 길이 절반(기본, 예전과 같음), box: 보는 방향에 따라 길이나 폭 절반")
     args = ap.parse_args()
     sync_mode = any(v is not None for v in (args.cam_skew_ms, args.cam_drop, args.cam_jitter_ms)) or args.skew_comp \
         or args.oncoming
@@ -293,10 +298,10 @@ def main() -> None:
             m, sync_summ[s] = run_sim_sync(
                 args.config, args.fps, args.frames, s, args.tracker, args.warmup,
                 per_camera(args.cam_skew_ms, n), per_camera(args.cam_drop, n), per_camera(args.cam_jitter_ms, n),
-                args.sync_tol_ms, args.sync_miss, args.skew_comp, args.oncoming,
+                args.sync_tol_ms, args.sync_miss, args.skew_comp, args.oncoming, args.vehicle_center,
             )
         else:
-            m = run_sim(args.config, args.fps, args.frames, s, args.tracker, args.warmup)
+            m = run_sim(args.config, args.fps, args.frames, s, args.tracker, args.warmup, args.vehicle_center)
         summ = m.summary()
         if args.events:
             summ["events"] = m.events
@@ -315,6 +320,7 @@ def main() -> None:
         "fps": args.fps,
         "frames": args.frames,
         "tracker": args.tracker,
+        "vehicle_center": args.vehicle_center,
         "total": total,
         "per_seed": per_seed,
     }

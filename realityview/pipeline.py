@@ -247,6 +247,7 @@ class RealityViewPipeline:
         view3d: View3DConfig | None = None,  # 3D 시점 설정(없으면 기본값)
         ground_every: int = 1,  # 3D 바닥(IPM 텍스처)을 몇 프레임마다 다시 만들지. 1이면 매 프레임
         tracker: str = "basic",  # 추적기 방식: "basic"(기본, 예전과 같음), "robust"(먼 물체 ID 쪼개짐 개선판)
+        vehicle_center: str = "ray",  # 차 중심 추정: "ray"(기본, 예전과 같음, 시선 방향 길이 절반), "box"(보는 방향에 따라 길이나 폭 절반)
         skew_comp: bool = False,  # True면 step()에 준 카메라별 시각 차이만큼 물체 위치를 트랙 속도로 옮긴다(기본 꺼짐)
         lanes: LaneConfig | None = None,  # 주면 차선 검출을 켠다(기본 꺼짐)
         lanes_every: int = 1,  # 차선 검출을 몇 프레임마다 할지. 그 사이는 지난 결과를 쓴다
@@ -259,6 +260,7 @@ class RealityViewPipeline:
         self.ipm = IpmCompositor(cameras, self.grid)
         self.tracker = BevTracker(scale=self.scale, mode=tracker)
         self.skew_comp = bool(skew_comp)
+        self.vehicle_center = vehicle_center
         self.show_ground = show_ground
         self.show_cameras = show_cameras
         self.timer = timer or StageTimer(enabled=False)
@@ -392,7 +394,8 @@ class RealityViewPipeline:
             objs = []
             for i, (cam, r) in enumerate(zip(self.cameras, results)):
                 dets = [d for d in r.detections if d.label not in AERIAL_LABELS]
-                objs += project_detections(i, cam, dets, max_range=40.0 * self.scale, scale=self.scale)
+                objs += project_detections(i, cam, dets, max_range=40.0 * self.scale, scale=self.scale,
+                                           vehicle_center=self.vehicle_center)
 
         # 2-1) 시각 맞춤 보정(옵션): 기준보다 앞뒤로 찍힌 카메라의 물체를 기준 시각 위치로 옮긴다
         if self.skew_comp and cam_offsets_s is not None:

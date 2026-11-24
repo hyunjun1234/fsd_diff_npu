@@ -18,6 +18,7 @@ from .types import Detection, FrameResult
 #   QuadSplitSource  : 쿼드 키트처럼 2x2로 합쳐진 한 프레임을 카메라 4개로 자른다. 카메라별 프레임 지연 보정.
 #   FrameSyncer      : 카메라마다 시각이 다를 때 기준 카메라 시각에 가장 가까운 프레임끼리 묶는다.
 #   SyncedSources    : 소스 목록을 FrameSyncer로 묶어 한 번에 읽는다(run_demo.py --sync).
+#   ReconnectingSource: 실시간 카메라가 응답하지 않으면 "신호 없음"으로 두고 일정 간격으로 다시 연다(--cam-retry).
 #   compensate_offsets: 묶음 안 카메라 시각 차이만큼 지면 물체 위치를 트랙 속도로 옮긴다(옵션).
 #   TimedVideoSource, GtReplayBackend: 합성 4대 장면 파일(out/sim4)을 재생하고 정답 상자를 검출처럼 돌려준다.
 #
@@ -305,7 +306,7 @@ class SyncBundle:
     frames: list
     stamps_ns: list  # 쓴 프레임의 시각. 빈 칸이면 None
     offsets_ms: list  # 쓴 프레임 시각 - 기준 시각(ms). 빈 칸이면 None
-    status: list  # "ok"(허용 오차 안), "hold"(이전 프레임 재사용), "blank"(빈 칸)
+    status: list  # "ok"(허용 오차 안), "hold"(이전 프레임 재사용), "blank"(빈 칸), "lost"(카메라 신호 없음)
     meta: list = field(default_factory=list)  # 프레임에 붙은 부가 정보(예: 파일 안 프레임 번호)
 
     @property
@@ -355,7 +356,8 @@ class FrameSyncer:
         self._blank = [np.zeros((h, w, 3), np.uint8) for w, h in self.sizes]
         self.count = 0
         self._abs: list[list[float]] = [[] for _ in range(self.n)]  # 카메라별 |차이| ms
-        self._status = [{"ok": 0, "hold": 0, "blank": 0} for _ in range(self.n)]
+        self._status = [{"ok": 0, "hold": 0, "blank": 0, "lost": 0} for _ in range(self.n)]
+        self._no_signal = [no_signal_frame(w, h, nm) for (w, h), nm in zip(self.sizes, self.names)]
         self._spread: list[float] = []
         self._csv = None
         if csv_path:
@@ -370,10 +372,23 @@ class FrameSyncer:
     def push(self, cam: int, frame: np.ndarray, ts_ns: int, meta=None) -> None:
         self._q[cam].append((frame, int(ts_ns), meta))
 
-    def bundle(self, ref_ns: int) -> SyncBundle:
+    def bundle(self, ref_ns: int, lost=()) -> SyncBundle:
+        """lost: 신호가 끊긴 카메라 번호들. 그 칸은 "lost" 상태의 신호 없음 영상이 되고,
+        끊기기 전 프레임이 hold로 다시 쓰이지 않게 그 카메라 대기열과 직전 프레임을 비운다."""
         ref_ns = int(ref_ns)
+        lost = set(lost)
         frames, stamps, offs, status, metas = [], [], [], [], []
         for i in range(self.n):
+            if i in lost:
+                self._q[i].clear()
+                self._prev[i] = None
+                frames.append(self._no_signal[i])
+                stamps.append(None)
+                offs.append(None)
+                metas.append(None)
+                status.append("lost")
+                self._status[i]["lost"] += 1
+                continue
             best = min(self._q[i], key=lambda e: abs(e[1] - ref_ns), default=None)
             if best is not None and abs(best[1] - ref_ns) <= self.tol_ns:
                 pick, st = best, "ok"
@@ -446,11 +461,16 @@ class SyncedSources:
       (파일 재생은 기다릴 필요가 없어서 시간 순서대로 꺼내 쓴다).
     - 실시간 소스(카메라)는 한 장씩 읽어 넣는다. 끝난 소스(None)는 다시 부르지 않는다.
     - 기준 소스가 끝나면 None.
+    - 신호 끊김: 소스가 None을 주면서 signal_lost가 참이면(ReconnectingSource) 끝난 것으로 보지 않는다.
+      그 칸은 이번 묶음에서 "lost"(신호 없음 영상)가 되고, 다음 read()에서 다시 읽는다.
+      기준 소스가 끊기면 lost_wait_s만큼 쉬고(빈 루프가 CPU를 태우지 않게) 지금 시각을 기준으로 삼아
+      나머지 카메라로 계속한다.
     """
 
-    def __init__(self, sources: list, syncer: FrameSyncer):
+    def __init__(self, sources: list, syncer: FrameSyncer, lost_wait_s: float = 0.05):
         self.sources = sources
         self.syncer = syncer
+        self.lost_wait_s = float(lost_wait_s)
         self.last: SyncBundle | None = None
         self._ended = [False] * len(sources)
 
@@ -458,14 +478,26 @@ class SyncedSources:
     def _meta(src):
         return getattr(src, "recorded_frame", None)
 
+    @staticmethod
+    def _lost(src) -> bool:
+        return bool(getattr(src, "signal_lost", False))
+
     def read(self) -> list[np.ndarray] | None:
         sy = self.syncer
         ref_src = self.sources[sy.ref]
+        lost = set()
         f = ref_src.read()
         if f is None:
-            return None
-        ref_ns = frame_stamp_ns(ref_src)
-        sy.push(sy.ref, f, ref_ns, self._meta(ref_src))
+            if not self._lost(ref_src):
+                return None
+            # 기준 카메라 신호 없음: 잠깐 쉬고 지금 시각을 기준으로 나머지 카메라를 묶는다
+            lost.add(sy.ref)
+            if self.lost_wait_s > 0:
+                time.sleep(self.lost_wait_s)
+            ref_ns = time.monotonic_ns()
+        else:
+            ref_ns = frame_stamp_ns(ref_src)
+            sy.push(sy.ref, f, ref_ns, self._meta(ref_src))
         for i, s in enumerate(self.sources):
             if i == sy.ref or self._ended[i]:
                 continue
@@ -481,11 +513,163 @@ class SyncedSources:
             else:
                 g = s.read()
                 if g is None:
-                    self._ended[i] = True
+                    if self._lost(s):
+                        lost.add(i)  # 끊김: 다음 read()에서 다시 부른다
+                    else:
+                        self._ended[i] = True
                     continue
                 sy.push(i, g, frame_stamp_ns(s), self._meta(s))
-        self.last = sy.bundle(ref_ns)
+        self.last = sy.bundle(ref_ns, lost)
         return self.last.frames
+
+
+# ---------------------------------------------------------------------------
+# 카메라 끊김: 신호 없음 표시와 다시 열기
+# ---------------------------------------------------------------------------
+def no_signal_frame(width: int, height: int, name: str = "") -> np.ndarray:
+    """끊긴 카메라 칸에 넣을 영상. 어두운 회색 바탕에 NO SIGNAL과 카메라 이름을 적는다.
+
+    OpenCV putText는 한글 글꼴이 없어 영어로 적는다. 검출기에는 물체가 없는 영상이라 검출이 나오지 않는다.
+    """
+    img = np.full((int(height), int(width), 3), 40, np.uint8)
+    text = "NO SIGNAL"
+    fs = max(0.5, min(width, height) / 300.0)
+    (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, fs, 2)
+    org = (max(0, (int(width) - tw) // 2), (int(height) + th) // 2)
+    cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, fs, (0, 0, 255), 2, cv2.LINE_AA)
+    if name:
+        cv2.putText(img, name, (10, 10 + th), cv2.FONT_HERSHEY_SIMPLEX, fs * 0.6, (200, 200, 200), 1, cv2.LINE_AA)
+    return img
+
+
+class ReconnectingSource:
+    """실시간 카메라 하나를 감싸 끊김과 복구를 처리한다(run_demo.py --cam-retry).
+
+    - 안쪽 소스의 read()가 None을 주면(UsbCameraSource는 wait_s초 안에 새 프레임이 없을 때) 끊긴 것으로 본다.
+      그때부터 signal_lost가 참이고 read()는 기다리지 않고 바로 None을 준다.
+    - 끊긴 동안 retry_s초마다 별도 스레드에서 open_fn()으로 새로 열고 한 장을 읽어 본다. 한 장을 받으면
+      그 소스로 바꿔 끼우고 signal_lost를 거짓으로 되돌린다. 열기가 실패하거나 오래 걸려도 메인 루프는 멈추지 않는다.
+    - 옛 소스 닫기도 별도 스레드에서 한다(멈춘 장치는 close()가 몇 초 걸릴 수 있다).
+    - 처음 열기는 지금처럼 바로 하고, 실패하면 예외를 그대로 올린다(설정 오류를 일찍 알리려고).
+    - stats(): 끊긴 횟수, 다시 열기 시도와 성공 횟수, 신호 없음으로 넘긴 read 수.
+    """
+
+    def __init__(self, open_fn, name: str = "", retry_s: float = 2.0, clock=time.monotonic):
+        self.open_fn = open_fn
+        self.name = name
+        self.retry_s = float(retry_s)
+        self.clock = clock
+        self._want_ts = False
+        self.src = open_fn()
+        self.signal_lost = False
+        self.drops = 0
+        self.retries = 0
+        self.reopens = 0
+        self.lost_reads = 0
+        self._next_try = 0.0
+        self._lock = threading.Lock()
+        self._pending = None  # 다시 열기 스레드가 성공하면 (새 소스, 첫 영상)
+        self._worker: threading.Thread | None = None
+        self._closed = False
+
+    # ---- 바깥 코드가 읽고 쓰는 속성은 안쪽 소스로 넘긴다 ---------------------
+    @property
+    def want_timestamp(self) -> bool:
+        return self._want_ts
+
+    @want_timestamp.setter
+    def want_timestamp(self, v: bool) -> None:
+        self._want_ts = bool(v)
+        if self.src is not None and hasattr(self.src, "want_timestamp"):
+            self.src.want_timestamp = self._want_ts
+
+    def __getattr__(self, key):
+        # last_timestamp_ns 같은 값은 지금 쓰는 안쪽 소스에서 꺼낸다. 끊긴 동안은 None
+        if key.startswith("_") or key in ("src",):
+            raise AttributeError(key)
+        src = self.__dict__.get("src")
+        if src is None:
+            if key in ("last_timestamp_ns", "recorded_timestamp_ns", "recorded_frame"):
+                return None
+            raise AttributeError(key)
+        return getattr(src, key)
+
+    # ---- 끊김과 다시 열기 ----------------------------------------------------
+    def _go_lost(self) -> None:
+        old, self.src = self.src, None
+        self.signal_lost = True
+        self.drops += 1
+        self._next_try = self.clock() + self.retry_s
+        if old is not None:
+            threading.Thread(target=_quiet_close, args=(old,), name=f"close-{self.name}", daemon=True).start()
+
+    def _reopen_job(self) -> None:
+        src = None
+        try:
+            src = self.open_fn()
+            if hasattr(src, "want_timestamp"):
+                src.want_timestamp = self._want_ts
+            f = src.read()  # 열리기만 하고 영상이 안 오는 장치는 복구로 치지 않는다
+            if f is None:
+                raise IOError("다시 열었지만 영상이 오지 않습니다")
+            with self._lock:
+                if self._closed:
+                    raise IOError("닫힌 뒤라 버립니다")
+                self._pending = (src, f)
+        except Exception:
+            if src is not None:
+                _quiet_close(src)
+
+    def _poll_reopen(self):
+        """다시 열기가 끝났으면 새 소스로 바꾸고 첫 영상을 돌려준다. 아니면 때가 되었을 때 새 시도를 시작한다."""
+        with self._lock:
+            got, self._pending = self._pending, None
+        if got is not None:
+            self.src, f = got
+            self.signal_lost = False
+            self.reopens += 1
+            return f
+        busy = self._worker is not None and self._worker.is_alive()
+        if not busy and self.clock() >= self._next_try:
+            self.retries += 1
+            self._next_try = self.clock() + self.retry_s
+            self._worker = threading.Thread(target=self._reopen_job, name=f"reopen-{self.name}", daemon=True)
+            self._worker.start()
+        return None
+
+    # ---- 바깥에서 부르는 함수 ------------------------------------------------
+    def read(self) -> np.ndarray | None:
+        if self.src is None:
+            f = self._poll_reopen()
+            if f is None:
+                self.lost_reads += 1
+            return f
+        f = self.src.read()
+        if f is None:
+            self._go_lost()
+            self.lost_reads += 1
+        return f
+
+    def stats(self) -> dict:
+        return {"name": self.name, "drops": self.drops, "retries": self.retries, "reopens": self.reopens,
+                "lost_reads": self.lost_reads, "signal_lost": self.signal_lost}
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
+            got, self._pending = self._pending, None
+        if got is not None:
+            _quiet_close(got[0])
+        if self.src is not None:
+            self.src.close()
+            self.src = None
+
+
+def _quiet_close(src) -> None:
+    try:
+        src.close()
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
