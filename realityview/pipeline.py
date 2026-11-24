@@ -11,7 +11,8 @@ from .bev import BevGrid, IpmCompositor, merge_cross_camera, project_detections
 from .camera_model import Camera
 from .detectors import Backend, SegBackend
 from .profiling import StageTimer
-from .render import annotate_camera, compose_dashboard, render_bev
+from .render import annotate_camera, compose_dashboard, compose_dashboard_3d, render_bev
+from .render3d import Renderer3D, View3DConfig
 from .tracker import BevTracker, Track
 from .types import FrameResult
 
@@ -19,6 +20,7 @@ from .types import FrameResult
 #   카메라 프레임 -> 검출/세그(NPU) -> 지면 투영, 병합, 추적, 바닥 영상 합성(CPU) -> 렌더링
 # 렌더링은 기본으로 같은 스레드에서 하고, render_thread=True면 별도 스레드에서 한다.
 # seg_backend를 주면 도로 세그를 다른 NPU에서 별도 스레드로 N 프레임마다 돌리고, 늦으면 최근 마스크를 쓴다.
+# view로 화면을 고른다: "bev"(기본, 탑뷰), "3d"(자차 뒤쪽 위 시점), "both"(탑뷰와 3D를 나란히).
 
 
 # ---------------------------------------------------------------------------
@@ -26,11 +28,12 @@ from .types import FrameResult
 # ---------------------------------------------------------------------------
 @dataclass
 class StepOutput:
-    dashboard: np.ndarray  # 왼쪽 탑뷰 + 오른쪽 카메라 영상(렌더링 스레드 모드에서는 가장 최근 완성본)
-    bev: np.ndarray  # 탑뷰만
+    dashboard: np.ndarray  # 화면 전체(렌더링 스레드 모드에서는 가장 최근 완성본). 배치는 view에 따라 다르다
+    bev: np.ndarray | None  # 탑뷰만. view="3d"이면 탑뷰를 그리지 않으므로 None
     tracks: list[Track]
     results: list[FrameResult]
     timings: dict  # 이번 프레임의 대략적인 구간 시간(ms). 자세한 통계는 StageTimer로 본다
+    view3d: np.ndarray | None = None  # 3D 시점 화면만(view가 "3d", "both"일 때)
 
 
 @dataclass
@@ -43,6 +46,8 @@ class _RenderJob:
     frames: list[np.ndarray]
     results: list[FrameResult]
     fps: float | None
+    t: float = 0.0  # step()에 넘긴 dt를 더한 시각(초). 3D 트랙 보간에 쓴다
+    refresh_ground: bool = True  # 3D 바닥을 이번에 다시 만들지(ground_every 프레임마다)
 
 
 def _snapshot_tracks(tracks: list[Track]) -> list[Track]:
@@ -67,7 +72,7 @@ class _RenderWorker:
         self._timer = timer
         self._cond = threading.Condition()
         self._job: _RenderJob | None = None
-        self._latest: tuple[np.ndarray, np.ndarray] | None = None
+        self._latest: tuple | None = None  # (대시보드, 탑뷰, 3D 화면)
         self._stop = False
         self.done = 0  # 완성한 대시보드 수
         self.dropped = 0  # 그리기 전에 새 작업에 밀려 버린 수
@@ -79,14 +84,19 @@ class _RenderWorker:
         with self._cond:
             if self._job is not None:
                 self.dropped += 1
+                # 버리는 작업이 3D 바닥을 다시 만들 차례였으면 그 일을 새 작업이 이어받는다.
+                # 안 그러면 바닥 갱신이 통째로 빠져 다음 갱신 차례까지 옛 바닥이 남는다.
+                # (렌더링 스레드 모드에서는 바닥 영상을 매 프레임 합성하므로 새 작업에도 바닥 영상이 있다)
+                if self._job.refresh_ground and not job.refresh_ground:
+                    job.refresh_ground = True
             self._job = job
             self._cond.notify()
 
-    def latest(self) -> tuple[np.ndarray, np.ndarray] | None:
+    def latest(self) -> tuple | None:
         with self._cond:
             return self._latest
 
-    def set_latest(self, out: tuple[np.ndarray, np.ndarray]) -> None:
+    def set_latest(self, out: tuple) -> None:
         """첫 프레임처럼 메인 스레드가 직접 그린 결과를 최신 결과로 등록한다."""
         with self._cond:
             self._latest = out
@@ -225,6 +235,9 @@ class RealityViewPipeline:
         seg_backend: SegBackend | None = None,  # 주면 도로 세그를 이 백엔드로 별도 스레드에서 돌린다(기본 없음)
         seg_every: int = 3,  # seg_backend가 있을 때 세그를 몇 프레임마다 넘길지
         scale: float = 1.0,  # 장면 축척. 책상 위 모형이면 실차 대비 비율(설정 scene.scale), 1.0이면 실차
+        view: str = "bev",  # 화면 종류: "bev"(기본), "3d", "both"
+        view3d: View3DConfig | None = None,  # 3D 시점 설정(없으면 기본값)
+        ground_every: int = 1,  # 3D 바닥(IPM 텍스처)을 몇 프레임마다 다시 만들지. 1이면 매 프레임
     ):
         self.cameras = cameras
         self.scale = float(scale)
@@ -235,6 +248,13 @@ class RealityViewPipeline:
         self.show_ground = show_ground
         self.show_cameras = show_cameras
         self.timer = timer or StageTimer(enabled=False)
+        if view not in ("bev", "3d", "both"):
+            raise ValueError(f"view는 bev, 3d, both 중 하나여야 합니다: {view}")
+        self.view = view
+        self.ground_every = max(1, int(ground_every))
+        # 3D 렌더러는 트랙 보간 상태와 바닥 캐시를 들고 있어서 렌더링을 하는 쪽(같은 스레드 또는 렌더링 스레드) 하나만 쓴다
+        self.r3d = Renderer3D(self.grid, view3d, scale=self.scale, timer=self.timer) if view != "bev" else None
+        self._time = 0.0  # dt 누적(초)
         self._fps = None
         self._last_step_t = None
         self._sync_renders = 0
@@ -326,9 +346,14 @@ class RealityViewPipeline:
             tracks = self.tracker.update(objs, dt)
 
         # 5) 바닥 영상과 도로 마스크를 탑뷰로 합성(IPM remap)
+        #    3D만 그릴 때 ground_every > 1이면 3D 바닥을 다시 만드는 프레임에만 합성한다(그 사이는 렌더러가 지난 바닥을 쓴다)
+        refresh = idx % self.ground_every == 0
+        #    렌더링 스레드 모드에서는 버린 작업의 갱신을 다음 작업이 이어받을 수 있게 늘 합성한다
+        need_ground = self.show_ground and (self.view != "3d" or refresh or self._worker is not None)
         with tm.stage("bev_warp"):
-            ground = self.ipm.warp(frames) if self.show_ground else None
+            ground = self.ipm.warp(frames) if need_ground else None
             road = self._warp_road(results, frames)
+        self._time += float(dt)
         t2 = time.perf_counter()
 
         # 화면에 찍는 FPS는 step() 호출 간격(카메라 획득까지 포함한 실제 갱신 주기)으로 구한다
@@ -338,10 +363,10 @@ class RealityViewPipeline:
         self._last_step_t = t0
 
         # 6) 렌더링(탑뷰, 카메라 주석, 대시보드 합치기)
-        job = _RenderJob(tracks, ground, road, frames, results, self._fps)
+        job = _RenderJob(tracks, ground, road, frames, results, self._fps, t=self._time, refresh_ground=refresh)
         if self._worker is None:
             with tm.stage("render"):
-                dash, bev = self._render(job)
+                dash, bev, v3d = self._render(job)
             self._sync_renders += 1
         else:
             job.tracks = _snapshot_tracks(tracks)
@@ -353,11 +378,11 @@ class RealityViewPipeline:
                 self._worker.set_latest(latest)
             else:
                 self._worker.submit(job)
-            dash, bev = latest
+            dash, bev, v3d = latest
         t3 = time.perf_counter()
 
         timings = {"npu_ms": (t1 - t0) * 1e3, "bev_ms": (t2 - t1) * 1e3, "render_ms": (t3 - t2) * 1e3}
-        return StepOutput(dash, bev, tracks, results, timings)
+        return StepOutput(dash, bev, tracks, results, timings, v3d)
 
     def _warp_road(self, results: list[FrameResult], frames: list[np.ndarray]) -> np.ndarray | None:
         """카메라별 도로 마스크를 탑뷰 한 장으로 합성한다. 마스크가 지난 프레임과 같으면 지난 결과를 다시 쓴다.
@@ -402,17 +427,34 @@ class RealityViewPipeline:
             self._seg_last_idx = mask_idx
             self._seg_fracs.append(float(np.mean([np.count_nonzero(m) / max(m.size, 1) for m in masks])))
 
-    def _render(self, job: _RenderJob) -> tuple[np.ndarray, np.ndarray]:
-        """탑뷰와 대시보드를 그린다. 같은 스레드와 렌더링 스레드가 함께 쓴다."""
-        bev = render_bev(self.grid, job.tracks, job.ground, job.road, self.ipm.coverage(), scale=self.scale)
+    def _render(self, job: _RenderJob) -> tuple[np.ndarray, np.ndarray | None, np.ndarray | None]:
+        """화면을 그린다. (대시보드, 탑뷰 또는 None, 3D 화면 또는 None). 같은 스레드와 렌더링 스레드가 함께 쓴다.
+
+        - bev: 왼쪽 탑뷰 + 오른쪽 카메라 영상(예전과 똑같다)
+        - 3d: 3D 화면을 크게, 오른쪽에 카메라 영상을 작게
+        - both: 왼쪽 탑뷰(작게) + 가운데 3D 화면 + 오른쪽 카메라 영상
+        """
+        bev = None
+        if self.view in ("bev", "both"):
+            bev = render_bev(self.grid, job.tracks, job.ground, job.road, self.ipm.coverage(), scale=self.scale)
+        v3d = None
+        if self.r3d is not None:
+            # 렌더링 스레드에서 불려도 timer.stage는 잠금으로 더하므로 안전하다(그 프레임 몫으로 들어간다)
+            with self.timer.stage("render3d"):
+                v3d = self.r3d.render(
+                    job.tracks, job.ground, job.road, self.ipm.coverage(), refresh_ground=job.refresh_ground, t=job.t
+                )
         views = []
         if self.show_cameras:
             views = [
                 annotate_camera(f, r.detections, c.name, r.road_mask)
                 for f, r, c in zip(job.frames, job.results, self.cameras)
             ]
-        dash = compose_dashboard(bev, views, job.fps)
-        return dash, bev
+        if v3d is None:
+            dash = compose_dashboard(bev, views, job.fps)
+        else:
+            dash = compose_dashboard_3d(v3d, views, bev=bev, fps=job.fps)
+        return dash, bev, v3d
 
     def close(self) -> None:
         if self._worker is not None:

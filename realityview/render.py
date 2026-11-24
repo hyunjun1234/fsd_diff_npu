@@ -106,6 +106,43 @@ _GROUND_LUT = _ground_lut()
 
 
 # ---------------------------------------------------------------------------
+# 바닥 층(탑뷰와 3D 시점이 같이 쓴다)
+# ---------------------------------------------------------------------------
+def render_ground_layer(
+    grid: BevGrid,
+    ground_img: np.ndarray | None = None,
+    road_mask: np.ndarray | None = None,
+    coverage: np.ndarray | None = None,
+) -> np.ndarray:
+    """탑뷰 크기의 바닥 그림만 새로 만든다(물체, 자차, 고리는 없음).
+
+    1) 바닥 영상: 회색으로 바꾼 뒤 색조 표로 한 번에 변환, 카메라가 보는 셀만 복사
+    2) 도로 마스크: 도로이면서 카메라가 보는 셀에만 도로색을 반쯤 섞는다
+    바닥 영상이 없으면 배경색 한 장이다. 돌려주는 배열은 새로 만든 것이라 받는 쪽이 고쳐도 된다.
+    """
+    H, W = grid.height, grid.width
+    canvas = np.empty((H, W, 3), np.uint8)
+    canvas[:] = BG
+    cov = as_mask_u8(coverage) if coverage is not None else None
+
+    if ground_img is not None:
+        g = cv2.cvtColor(ground_img, cv2.COLOR_BGR2GRAY)
+        layer = cv2.LUT(cv2.cvtColor(g, cv2.COLOR_GRAY2BGR), _GROUND_LUT)
+        if cov is None:
+            canvas = layer
+        else:
+            cv2.copyTo(layer, cov, canvas)
+
+    if road_mask is not None:
+        m = as_mask_u8(road_mask)
+        if cov is not None:
+            # 값이 1이 아닌 마스크(예: 255)도 있으니 먼저 0/255로 맞춘 뒤 coverage와 겹친다
+            m = cv2.bitwise_and(cv2.compare(m, 0, cv2.CMP_GT), cov)
+        blend_where(canvas, m, ROAD, 0.5)
+    return canvas
+
+
+# ---------------------------------------------------------------------------
 # 탑뷰
 # ---------------------------------------------------------------------------
 def render_bev(
@@ -125,27 +162,8 @@ def render_bev(
     road_mask: 탑뷰 크기의 도로 마스크(0이 아니면 도로). 도로색을 반쯤 섞는다
     coverage: 카메라가 보는 셀(bool 또는 uint8). 이 밖은 배경색으로 둔다
     """
-    H, W = grid.height, grid.width
-    canvas = np.empty((H, W, 3), np.uint8)
-    canvas[:] = BG
-    cov = as_mask_u8(coverage) if coverage is not None else None
-
-    # ---- 1) 바닥 영상: 회색으로 바꾼 뒤 색조 표로 한 번에 변환, 카메라가 보는 셀만 복사 ----
-    if ground_img is not None:
-        g = cv2.cvtColor(ground_img, cv2.COLOR_BGR2GRAY)
-        layer = cv2.LUT(cv2.cvtColor(g, cv2.COLOR_GRAY2BGR), _GROUND_LUT)
-        if cov is None:
-            canvas = layer
-        else:
-            cv2.copyTo(layer, cov, canvas)
-
-    # ---- 2) 도로 마스크: 도로이면서 카메라가 보는 셀에만 도로색을 반쯤 섞는다 ----
-    if road_mask is not None:
-        m = as_mask_u8(road_mask)
-        if cov is not None:
-            # 값이 1이 아닌 마스크(예: 255)도 있으니 먼저 0/255로 맞춘 뒤 coverage와 겹친다
-            m = cv2.bitwise_and(cv2.compare(m, 0, cv2.CMP_GT), cov)
-        blend_where(canvas, m, ROAD, 0.5)
+    # ---- 1), 2) 바닥 영상과 도로 마스크(3D 시점도 같은 함수로 바닥을 만든다) ----
+    canvas = render_ground_layer(grid, ground_img, road_mask, coverage)
 
     # ---- 3) 거리 고리, 자차 ----
     _draw_rings(canvas, grid, scale)
@@ -238,4 +256,63 @@ def compose_dashboard(bev: np.ndarray, cam_views: list[np.ndarray], fps: float |
         out = bev.copy()
     if fps is not None:
         cv2.putText(out, f"{fps:.1f} FPS", (10, H - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+    return out
+
+
+def _even(v: float) -> int:
+    """짝수 정수로 내림(최소 2). H.264(avc1) 녹화는 폭과 높이가 짝수여야 열린다."""
+    return max(2, int(v) // 2 * 2)
+
+
+def _fit_width(img: np.ndarray, w: int) -> np.ndarray:
+    """비율을 지키며 폭을 w로 맞춘다."""
+    h = max(1, int(round(img.shape[0] * w / img.shape[1])))
+    return cv2.resize(img, (w, h), interpolation=cv2.INTER_AREA)
+
+
+def compose_dashboard_3d(
+    main: np.ndarray,
+    cam_views: list[np.ndarray],
+    bev: np.ndarray | None = None,
+    fps: float | None = None,
+    side_ratio: float = 1 / 3,
+) -> np.ndarray:
+    """3D 시점을 크게, 카메라 영상을 작게 두는 배치.
+
+    [탑뷰(있을 때, 높이를 3D에 맞춤)] [3D 시점(큰 화면)] [카메라 영상 세로 줄(폭 = 3D 폭 x side_ratio)]
+    - 카메라 줄이 3D 높이보다 길면 모든 칸을 같은 비율로 줄여 넣고, 남는 자리는 배경색으로 채운다.
+    - 결과 크기는 입력 크기로만 정해지므로 프레임마다 같다(녹화 파일 크기가 바뀌지 않는다).
+    - main 폭과 높이가 짝수이면 결과도 짝수 크기다.
+    """
+    H, W = main.shape[:2]
+    parts = []
+    if bev is not None:
+        bw = _even(bev.shape[1] * H / bev.shape[0])
+        parts.append(cv2.resize(bev, (bw, H), interpolation=cv2.INTER_AREA))
+    parts.append(main)
+    if cam_views:
+        col_w = _even(W * side_ratio)
+        col = np.empty((H, col_w, 3), np.uint8)
+        col[:] = BG
+        tiles = [_fit_width(v, col_w) for v in cam_views]
+        total = sum(t.shape[0] for t in tiles)
+        if total > H:
+            # 세로로 다 들어가지 않으면 모든 칸을 같은 비율로 줄이고 가운데 정렬한다
+            k = H / total
+            tiles = [cv2.resize(t, (max(1, int(t.shape[1] * k)), max(1, int(t.shape[0] * k))), interpolation=cv2.INTER_AREA)
+                     for t in tiles]
+        y = 0
+        for t in tiles:
+            h, w = t.shape[:2]
+            h = min(h, H - y)
+            if h <= 0:
+                break
+            x = (col_w - w) // 2
+            col[y:y + h, x:x + w] = t[:h]
+            y += h
+        parts.append(col)
+    out = np.hstack(parts) if len(parts) > 1 else main.copy()
+    if fps is not None:
+        x0 = parts[0].shape[1] if bev is not None else 0
+        cv2.putText(out, f"{fps:.1f} FPS", (x0 + 10, H - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
     return out

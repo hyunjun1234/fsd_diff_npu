@@ -34,6 +34,8 @@ STAGE_ORDER = (
     "track",         # 추적
     "bev_warp",      # BEV 바닥 영상 합성(IPM remap)
     "render",        # 렌더링(BEV 그림, 카메라 주석, 대시보드)
+    "render3d",      # 3D 시점 그리기(render 안에 들어 있다, --view 3d/both)
+    "render3d_ground",  # 3D 바닥을 다시 만든 시간(render3d 안, 다시 만든 프레임에만 기록)
     "frame_total",   # 한 프레임 전체(루프 한 바퀴)
 )
 
@@ -51,6 +53,8 @@ STAGE_LABEL_KO = {
     "track": "추적",
     "bev_warp": "BEV 합성",
     "render": "렌더링",
+    "render3d": "3D 시점(렌더링 안)",
+    "render3d_ground": "3D 바닥 갱신(3D 안)",
     "frame_total": "프레임 전체",
 }
 

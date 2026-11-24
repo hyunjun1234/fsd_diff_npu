@@ -13,6 +13,12 @@
 | 2단계 DX-M1 추가 | 도로 IoU 측정 남음 |
 | 4단계 준비 | BEVPool CPU 구현 끝남 |
 
+## 3D 시점 화면
+
+`run_demo.py --view 3d`로 테슬라 리얼리티 뷰처럼 자차 뒤쪽 위에서 내려다보는 화면을 그립니다(`both`는 탑뷰와 함께, 기본은 `bev`). 시뮬레이션 결과는 아래와 같고, 영상은 [videos](videos/)에 있습니다. 파이5 카메라 2대에서 20.8 FPS이고, 바닥 갱신을 3프레임마다, 해상도를 절반으로 하면 28.3 FPS입니다(물체가 없는 장면).
+
+![3D 시점 시뮬레이션](images/phase1_render3d_sim.png)
+
 ## 장비 구성
 
 라즈베리파이 5(Debian 13, 64비트)에 Seeed 듀얼 M.2 HAT로 Hailo-8과 DX-M1 4GB를 함께 달았고, 두 NPU 모두 PCIe Gen3 x1로 인식됩니다. 런타임은 HailoRT 4.23.0, DXRT 3.4.2이고, `dx_engine`은 파이 저장소의 `.venv`에만 있습니다.
@@ -50,12 +56,13 @@ cd ~/Desktop/App/fsd_diff_npu && python ~/Desktop/App/fsd_agent.py --task-file d
 | 센서에서 화면까지 지연, Hailo 단독 (평균 / p95) | 81 / 97ms |
 | 같은 지연, Hailo + DX-M1 세그 | 94 / 114ms |
 | DX-M1 깊이 yolo26-depth-n (장당 NPU) | 25.4ms |
+| 3D 시점 화면, Hailo 단독 | 20.8 FPS |
 
 1단계 기본 설정에서 병목은 NPU(약 18ms)가 아니라 CPU의 BEV 합성(23ms)과 렌더링(28ms)이었습니다. 도로 마스크 덧칠을 OpenCV로 바꿔 카메라 2대 기준 39.5ms에서 5.8ms로 줄였습니다. BEVPool은 입력 256x704, D=88, C=64, BEV 100x100 조건이고 NumPy로는 약 110ms라 C 구현(ctypes, OpenMP)을 씁니다. 21.4 FPS는 세그 자리에 드론 모델을 넣어 잰 값이고, 실제 BiSeNetV2 세그로는 19.6 FPS입니다. 세그는 한 번(카메라 2장)에 151ms가 걸려 3프레임마다 돌립니다. 검출 비교는 방 안 녹화 100프레임에서 COCO 80 클래스, 점수 0.25로 했습니다(사람과 차가 없어서).
 
 ## 다음에 할 일
 
-1. 3D 시점 렌더러([agent_tasks/10_reality_view_3d.txt](agent_tasks/10_reality_view_3d.txt)): 테슬라 리얼리티 뷰처럼 차 뒤쪽 위에서 내려다보는 화면을 만듭니다.
+1. 3D 시점 화면 다듬기: tracker.py가 한 차를 트랙 두 개로 나누는 경우가 시뮬레이션에서 보였고, 사람이나 차가 보이는 장면에서 3D 화면 FPS를 실측해야 합니다.
 2. DX-M1 방열팬을 단 뒤 깊이 모델(yolo26-depth-n 추천, 대안 fastdepth)을 별도 스레드로 파이프라인에 붙입니다. 모델 비교는 [09 측정 문서](measurements/09_npu_models.md)에 있습니다.
 3. 사용자가 모형 보정을 마치면, 보정값을 넣고 거리 오차와 도로 IoU(직접 칠한 20프레임)를 잽니다.
 4. 3단계(카메라 4대)와 연산자 확인, FlashOcc 재학습은 쿼드 카메라와 x86 GPU 서버가 준비된 뒤에 합니다.
@@ -95,5 +102,6 @@ cd ~/Desktop/App/fsd_diff_npu && python ~/Desktop/App/fsd_agent.py --task-file d
 | 07 테슬라 배치 기준 설정 | 5.99달러 |
 | 08 연속 실행과 지연, 녹화 | 6.64달러 |
 | 09 깊이와 세그 모델 비교 | 6.64달러 |
+| 10 3D 시점 렌더러 | 8.40달러 |
 
-합계는 53.93달러에 끊긴 실행 한 번이 더해집니다. 실제 금액은 Console의 Cost 페이지가 기준입니다.
+합계는 62.33달러에 끊긴 실행 한 번이 더해집니다. 실제 금액은 Console의 Cost 페이지가 기준입니다.

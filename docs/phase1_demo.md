@@ -20,6 +20,7 @@
 - `realityview/detectors.py`: `HailoBackend`(라즈베리파이), `UltralyticsBackend`(PC 개발용)
 - `realityview/tracker.py`: BEV 평면에서 가장 가까운 것끼리 맞추는 추적
 - `realityview/render.py`: 위에서 본 그림 렌더링과 대시보드
+- `realityview/render3d.py`: 자차 뒤쪽 위에서 본 3D 시점 렌더링(`--view 3d`)
 - `realityview/sim.py`: 하드웨어 없이 확인하는 합성 장면과 가짜 검출기
 - `scripts/run_demo.py`: 실행 스크립트
 - `scripts/calib_intrinsics.py`, `scripts/calib_extrinsics.py`: 카메라 보정
@@ -39,6 +40,28 @@ python scripts/run_demo.py --config configs/four_cam.yaml --backend sim --frames
 ```bash
 python scripts/run_demo.py --backend ultralytics --video front=rec/front.mp4 --video rear=rec/rear.mp4
 ```
+
+## 3D 시점으로 보기
+
+`--view 3d`를 주면 자차 뒤쪽 위의 가상 카메라에서 내려다본 화면을 크게 그리고, 카메라 영상은 오른쪽에 작게 둡니다. `--view both`는 왼쪽에 탑뷰를 더합니다. 옵션을 주지 않으면 지금처럼 탑뷰(`bev`)입니다. 코드는 `realityview/render3d.py`에 있습니다.
+
+```bash
+python scripts/run_demo.py --backend sim --view 3d --view3d-interp --fps 15 --frames 225 --save out/video/sim3d.mp4 --headless
+```
+
+결과 영상은 `out/video/sim3d.mp4`에 생깁니다. 바닥은 IPM 바닥 영상과 도로 마스크를 원근으로 편 것이고, 차와 트럭은 반투명 박스, 사람은 세로 원기둥으로 그립니다. 먼 물체부터 그려서 가까운 물체가 앞을 가립니다. 박스 위 숫자는 트랙 ID, 바닥의 화살표는 1초 뒤 위치까지의 상대 속도입니다.
+
+| 옵션 | 뜻 | 기본값 |
+|---|---|---|
+| `--view3d-cam` | 가상 카메라 뒤 거리, 높이, 숙임각, 수평 화각(실차 m, 도) | 7,4.5,18,70 |
+| `--view3d-size` | 3D 화면 크기 | 960x540 |
+| `--view3d-interp` | 트랙 표시 위치를 프레임 사이에서 부드럽게 보간 | 꺼짐 |
+| `--view3d-scale` | 이 비율로 작게 그린 뒤 키움(0.1~1) | 1 |
+| `--view3d-ground-every` | 바닥 텍스처를 N 프레임마다 다시 만듦 | 1 |
+
+화면이 느리면 `--view3d-ground-every 3 --view3d-scale 0.5`를 먼저 씁니다. 바닥을 다시 만드는 일이 3D 그리기 시간의 대부분이라 갱신 주기를 늘리는 쪽이 효과가 큽니다. 모형 설정(`scene.scale`)에서는 가상 카메라 위치와 물체 크기에 같은 축척을 곱하므로 실차 설정과 같은 화면이 나옵니다. 설정 파일에 `view3d:` 항목을 두면 `View3DConfig`의 기본값을 바꿀 수 있고, 명령줄 옵션이 그 위에 덮어씁니다.
+
+3D 그리기만 따로 재려면 `python3 scripts/bench_render3d.py --out out/measure/bench_render3d.json`을 실행합니다. 카메라와 NPU 없이 가짜 트랙 0, 10, 20개로 재고, 결과는 `--out` 경로에 생깁니다.
 
 ## 라즈베리파이 5와 Hailo-8에 설치하기
 

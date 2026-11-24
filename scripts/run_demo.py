@@ -49,6 +49,9 @@ from realityview.profiling import (  # noqa: E402
 #   timeout -s INT -k 10 120 python scripts/run_demo.py --config configs/two_cam_current.yaml \
 #       --backend hailo --headless --duration 60 --record-video out/video/hailo_60s.mp4
 #
+#   # 3D 시점(자차 뒤쪽 위에서 내려다봄). both는 탑뷰와 3D를 나란히. 기본은 지금처럼 bev
+#   python scripts/run_demo.py --backend sim --view 3d --view3d-interp --frames 150 --save out/sim3d.mp4 --headless
+#
 #   # PC에서 녹화 영상으로 개발 (ultralytics 필요)
 #   python scripts/run_demo.py --backend ultralytics --video front=rec/front.mp4 --video rear=rec/rear.mp4
 
@@ -111,7 +114,46 @@ def build_parser() -> argparse.ArgumentParser:
         help="녹화 파일 fps. 0이면 워밍업 동안 잰 루프 속도를 반올림해 쓴다(재생 속도는 실제 시간에 맞춤)",
     )
     ap.add_argument("--record-codec", default="avc1,mp4v", help="시도할 코덱 순서(쉼표 구분). 기본 avc1,mp4v")
+    # ---- 화면 종류(기본 bev = 예전과 같은 탑뷰 대시보드) ----
+    ap.add_argument(
+        "--view",
+        choices=["bev", "3d", "both"],
+        default="bev",
+        help="bev: 탑뷰(기본), 3d: 자차 뒤쪽 위 3D 시점을 크게, both: 탑뷰 + 3D 시점",
+    )
+    ap.add_argument("--view3d-size", default=None, help="3D 화면 크기 폭x높이. 기본 960x540(설정 view3d 항목이 있으면 그 값)")
+    ap.add_argument("--view3d-scale", type=float, default=None, help="3D를 이 비율로 작게 그린 뒤 키움(0.1~1). 예: 0.5")
+    ap.add_argument("--view3d-ground-every", type=int, default=1, help="3D 바닥 텍스처를 N 프레임마다 다시 만듦. 기본 1")
+    ap.add_argument("--view3d-interp", action="store_true", help="3D 화면의 트랙 위치를 프레임 사이에서 부드럽게 보간")
+    ap.add_argument(
+        "--view3d-cam",
+        default=None,
+        help="가상 카메라 '뒤거리,높이,숙임각,수평화각'(실차 m, 도). 기본 7,4.5,18,70",
+    )
     return ap
+
+
+# ---------------------------------------------------------------------------
+# 3D 시점 설정 만들기
+# ---------------------------------------------------------------------------
+def make_view3d_config(args, cfg: dict):
+    """3D 시점 설정. 설정 파일의 view3d 항목(있으면)을 바탕으로 명령줄 옵션을 덮어쓴다."""
+    from realityview.render3d import View3DConfig
+
+    base = dict(cfg.get("view3d") or {})
+    if args.view3d_size:
+        w, h = args.view3d_size.lower().split("x")
+        base["width"], base["height"] = int(w), int(h)
+    if args.view3d_scale is not None:
+        base["render_scale"] = float(args.view3d_scale)
+    if args.view3d_interp:
+        base["interp"] = True
+    if args.view3d_cam:
+        vals = [float(v) for v in args.view3d_cam.split(",")]
+        if len(vals) != 4:
+            raise SystemExit("--view3d-cam 은 '뒤거리,높이,숙임각,수평화각' 네 값입니다. 예: 7,4.5,18,70")
+        base["cam_back"], base["cam_height"], base["pitch_deg"], base["hfov_deg"] = vals
+    return View3DConfig(**base).checked()
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +180,9 @@ def profile_report(args, timer: StageTimer, pipe, health_start: dict, loop: dict
             "render_thread": args.render_thread,
             "seg_npu": args.seg_npu,
             "seg_mask_test": args.seg_mask_test,
+            "view": args.view,
+            "view3d": dataclasses.asdict(pipe.r3d.cfg) if pipe.r3d is not None else None,
+            "view3d_ground_every": pipe.ground_every,
             "warmup": timer.warmup,
         },
         "seg_stats": pipe.seg_stats,
@@ -294,6 +339,9 @@ def main() -> None:
         seg_backend=seg_backend,
         seg_every=int(npu.get("seg_every", 3)),
         scale=float((cfg.get("scene") or {}).get("scale", 1.0)),  # 모형 설정은 scene.scale (없으면 실차 1.0)
+        view=args.view,
+        view3d=make_view3d_config(args, cfg) if args.view != "bev" else None,
+        ground_every=args.view3d_ground_every,
     )
 
     # ---- 메인 루프 ----
