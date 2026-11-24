@@ -1,18 +1,19 @@
-"""카메라별 검출 + 세그멘테이션 백엔드.
-
-- HailoBackend: 라즈베리파이 5 + Hailo-8/8L. Hailo Model Zoo의 HEF를 그대로 쓴다.
-  (검출: yolov8s/yolov8m 등 NMS 내장 HEF, 세그: Cityscapes 학습 시맨틱 세그 HEF 선택)
-- UltralyticsBackend: PC 개발용. ultralytics YOLO로 검출만 한다.
-- 시뮬레이션은 sim.SimBackend 참고.
-"""
 from __future__ import annotations
 
+import os
 from typing import Protocol, Sequence
 
 import cv2
 import numpy as np
 
+from .profiling import StageTimer
 from .types import COCO_KEEP, Detection, FrameResult
+
+# 카메라별 검출 + 세그멘테이션 백엔드.
+# - HailoBackend: 라즈베리파이 5 + Hailo-8/8L. Hailo Model Zoo의 HEF를 그대로 쓴다.
+#   (검출: yolov8s/yolov8m 등 NMS 내장 HEF, 세그: Cityscapes 학습 시맨틱 세그 HEF 선택)
+# - UltralyticsBackend: PC 개발용. ultralytics YOLO로 검출만 한다.
+# - 시뮬레이션은 sim.SimBackend 참고.
 
 
 class Backend(Protocol):
@@ -38,16 +39,23 @@ def letterbox(img: np.ndarray, size_hw: tuple[int, int]) -> tuple[np.ndarray, fl
 
 
 def parse_hailo_nms(
-    nms_out, size_hw: tuple[int, int], scale: float, pad: tuple[int, int], score_thr: float
+    nms_out,
+    size_hw: tuple[int, int],
+    scale: float,
+    pad: tuple[int, int],
+    score_thr: float,
+    labels: dict | None = None,
 ) -> list[Detection]:
     """HailoRT NMS(by class) 출력 → Detection.
 
     nms_out: 클래스 개수만큼의 배열 목록, 각 배열은 (n, 5) = [ymin, xmin, ymax, xmax, score] (0~1 정규화).
+    labels: 클래스 번호 → 이름. 없으면 주행에 필요한 COCO_KEEP만 남긴다.
     """
     th, tw = size_hw
+    keep = COCO_KEEP if labels is None else labels
     dets = []
     for cls_id, arr in enumerate(nms_out):
-        label = COCO_KEEP.get(cls_id)
+        label = keep.get(cls_id)
         if label is None:
             continue
         arr = np.asarray(arr)
@@ -122,9 +130,19 @@ class HailoBackend:
         score_thr: float = 0.4,
         road_classes: Sequence[int] = (0,),  # Cityscapes trainId 0 = road
         seg_every: int = 3,  # 세그는 N 프레임마다 한 번(도로는 천천히 변한다)
+        timer: StageTimer | None = None,  # 단계별 시간 측정(기본 꺼짐)
+        labels: dict | None = None,  # 남길 클래스(번호 → 이름). None이면 COCO_KEEP
     ):
         from hailo_platform import HailoSchedulingAlgorithm, VDevice  # type: ignore
 
+        # HEF가 없으면 HailoRT 안쪽에서 알아보기 힘든 오류가 나므로 먼저 확인한다
+        for p in (det_hef, seg_hef):
+            if p and not os.path.isfile(p):
+                raise FileNotFoundError(
+                    f"HEF 파일이 없습니다: {p} (예: mkdir -p models && cp /usr/share/hailo-models/yolov8s_h8.hef models/)"
+                )
+        self.timer = timer or StageTimer(enabled=False)
+        self.labels = labels
         params = VDevice.create_params()
         params.scheduling_algorithm = HailoSchedulingAlgorithm.ROUND_ROBIN
         self.vdevice = VDevice(params)
@@ -138,26 +156,35 @@ class HailoBackend:
 
     def infer(self, frames: Sequence[np.ndarray]) -> list[FrameResult]:
         # 카메라 N대 영상을 한 배치로 넣는다. frames는 BGR.
-        boxes, metas = [], []
-        for f in frames:
-            lb, s, pad = letterbox(cv2.cvtColor(f, cv2.COLOR_BGR2RGB), self.det.input_hw)
-            boxes.append(lb)
-            metas.append((s, pad))
-        out = self.det.infer(np.stack(boxes))
-        nms = out[self.det.output_names[0]]
-        results = []
-        for i, (s, pad) in enumerate(metas):
-            dets = parse_hailo_nms(nms[i], self.det.input_hw, s, pad, self.score_thr)
-            results.append(FrameResult(detections=dets))
+        tm = self.timer
+        # ---- 전처리: BGR->RGB, 비율 유지 리사이즈 + 패딩 ----
+        with tm.stage("preprocess"):
+            boxes, metas = [], []
+            for f in frames:
+                lb, s, pad = letterbox(cv2.cvtColor(f, cv2.COLOR_BGR2RGB), self.det.input_hw)
+                boxes.append(lb)
+                metas.append((s, pad))
+            batch = np.stack(boxes)
+        # ---- Hailo 추론(장치로 보내고 결과 받기까지) ----
+        with tm.stage("hailo_infer"):
+            out = self.det.infer(batch)
+        # ---- NMS 출력 → 원본 영상 좌표의 Detection ----
+        with tm.stage("nms_parse"):
+            nms = out[self.det.output_names[0]]
+            results = []
+            for i, (s, pad) in enumerate(metas):
+                dets = parse_hailo_nms(nms[i], self.det.input_hw, s, pad, self.score_thr, self.labels)
+                results.append(FrameResult(detections=dets))
 
         if self.seg is not None:
             if self._frame_idx % self.seg_every == 0 or len(self._last_masks) != len(frames):
-                th, tw = self.seg.input_hw
-                batch = np.stack([cv2.resize(cv2.cvtColor(f, cv2.COLOR_BGR2RGB), (tw, th)) for f in frames])
-                sout = self.seg.infer(batch)[self.seg.output_names[0]]
-                self._last_masks = [
-                    seg_to_road_mask(sout[i], frames[i].shape[:2], self.road_classes) for i in range(len(frames))
-                ]
+                with tm.stage("seg"):
+                    th, tw = self.seg.input_hw
+                    batch = np.stack([cv2.resize(cv2.cvtColor(f, cv2.COLOR_BGR2RGB), (tw, th)) for f in frames])
+                    sout = self.seg.infer(batch)[self.seg.output_names[0]]
+                    self._last_masks = [
+                        seg_to_road_mask(sout[i], frames[i].shape[:2], self.road_classes) for i in range(len(frames))
+                    ]
             for r, m in zip(results, self._last_masks):
                 r.road_mask = m
         self._frame_idx += 1
