@@ -130,7 +130,44 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="가상 카메라 '뒤거리,높이,숙임각,수평화각'(실차 m, 도). 기본 7,4.5,18,70",
     )
+    # ---- 추적기(기본 basic = 예전과 같음) ----
+    ap.add_argument(
+        "--tracker",
+        choices=["basic", "robust"],
+        default="basic",
+        help="basic: 예전 추적기(기본), robust: 먼 물체 ID 쪼개짐을 고친 판(out/measure/11_tracker_latency.md)",
+    )
+    # ---- 저장 이미지 재생(기본 꺼짐) ----
+    ap.add_argument(
+        "--replay",
+        default=None,
+        help="카메라 대신 이 폴더의 '{카메라 이름}_*.png|jpg' 이미지를 차례로 넣음(끝나면 처음부터). 예: out/rec/room_100",
+    )
+    # ---- CSI 카메라 지연 시험 옵션(기본은 모두 설정 파일 값 그대로) ----
+    ap.add_argument("--cam-fps", type=float, default=None, help="Picamera2 프레임레이트를 이 값으로 덮어씀. 예: 25")
+    ap.add_argument("--cam-buffers", type=int, default=None, help="Picamera2 buffer_count. 기본은 Picamera2 값(6)")
+    ap.add_argument(
+        "--cam-queue",
+        choices=["on", "off"],
+        default=None,
+        help="off: Picamera2가 끝난 프레임을 들고 있지 않고 늘 다음 프레임을 기다림. 기본은 Picamera2 값(on)",
+    )
+    ap.add_argument("--cam-flush", action="store_true", help="read()마다 부른 뒤에 노출을 시작한 프레임만 받음")
     return ap
+
+
+def camera_override(args) -> dict:
+    """--cam-* 옵션을 picamera2 소스 설정에 덮어쓸 값으로 바꾼다. 아무것도 안 주면 빈 사전(설정 그대로)."""
+    ov = {}
+    if args.cam_fps is not None:
+        ov["fps"] = float(args.cam_fps)
+    if args.cam_buffers is not None:
+        ov["buffer_count"] = int(args.cam_buffers)
+    if args.cam_queue is not None:
+        ov["queue"] = args.cam_queue == "on"
+    if args.cam_flush:
+        ov["flush"] = True
+    return ov
 
 
 # ---------------------------------------------------------------------------
@@ -277,12 +314,21 @@ def main() -> None:
         world = SimWorld(cams)
         backend = SimBackend(world)
     else:
-        from realityview.sources import open_source
+        from realityview.sources import ReplaySource, open_source
 
         overrides = dict(v.split("=", 1) for v in args.video)
+        cam_ov = camera_override(args)
         try:
             for c in cams:
-                sources.append(open_source(c, {"type": "opencv", "uri": overrides[c.name]} if c.name in overrides else None))
+                if args.replay:
+                    # 저장 이미지 재생: 카메라를 열지 않는다
+                    sources.append(ReplaySource(args.replay, c.name, c.width, c.height))
+                elif c.name in overrides:
+                    sources.append(open_source(c, {"type": "opencv", "uri": overrides[c.name]}))
+                else:
+                    # --cam-* 옵션은 CSI 카메라(picamera2)에만 덮어쓴다
+                    is_pi = c.source.get("type") == "picamera2"
+                    sources.append(open_source(c, cam_ov if (cam_ov and is_pi) else None))
         except Exception:
             # 두 번째 카메라에서 실패해도 먼저 연 카메라는 놓아 준다
             for s in sources:
@@ -342,6 +388,7 @@ def main() -> None:
         view=args.view,
         view3d=make_view3d_config(args, cfg) if args.view != "bev" else None,
         ground_every=args.view3d_ground_every,
+        tracker=args.tracker,
     )
 
     # ---- 메인 루프 ----

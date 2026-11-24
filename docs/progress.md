@@ -19,6 +19,10 @@
 
 ![3D 시점 시뮬레이션](images/phase1_render3d_sim.png)
 
+먼 차 하나가 트랙 여러 개로 쪼개지던 문제는 `--tracker robust`로 고쳤습니다. 시뮬레이션 정답과 비교하면(`scripts/eval_tracking.py`, 225프레임 x seed 5개, 15fps) ID 바뀜이 카메라 2대에서 381회에서 48회로, 카메라 4대에서 487회에서 51회로 줄었습니다. 기본값은 아직 basic이고, 실제 카메라 장면에서 확인한 뒤 바꿉니다.
+
+센서에서 화면까지 지연(Hailo 단독, 평균 84.1ms, 26.1 FPS) 중 약 16ms는 Picamera2가 들고 있던 프레임이 묵은 몫입니다. `--cam-fps 20`이면 74.0ms, `--cam-queue off`면 67.9ms로 줄지만 FPS도 20.0, 15.0으로 떨어져 기본값은 그대로 둡니다. 카메라 앞에 사람이 없어도 `--replay 폴더`로 저장 이미지를 넣어 3D 화면의 사람 표시를 확인할 수 있습니다.
+
 ## 장비 구성
 
 라즈베리파이 5(Debian 13, 64비트)에 Seeed 듀얼 M.2 HAT로 Hailo-8과 DX-M1 4GB를 함께 달았고, 두 NPU 모두 PCIe Gen3 x1로 인식됩니다. 런타임은 HailoRT 4.23.0, DXRT 3.4.2이고, `dx_engine`은 파이 저장소의 `.venv`에만 있습니다.
@@ -62,7 +66,7 @@ cd ~/Desktop/App/fsd_diff_npu && python ~/Desktop/App/fsd_agent.py --task-file d
 
 ## 다음에 할 일
 
-1. 3D 시점 화면 다듬기: tracker.py가 한 차를 트랙 두 개로 나누는 경우가 시뮬레이션에서 보였고, 사람이나 차가 보이는 장면에서 3D 화면 FPS를 실측해야 합니다.
+1. 실제 장면 확인: 사람이 걷는 장면을 `scripts/record_frames.py`로 녹화해 `--replay`와 `--tracker robust`로 보고, robust를 기본값으로 바꿀지와 물체가 있을 때의 3D 화면 FPS를 확인합니다. 카메라 4대 시뮬레이션에서 남은 중복 표시는 측면 카메라의 투영점 가정을 확인해야 합니다.
 2. DX-M1 방열팬을 단 뒤 깊이 모델(yolo26-depth-n 추천, 대안 fastdepth)을 별도 스레드로 파이프라인에 붙입니다. 모델 비교는 [09 측정 문서](measurements/09_npu_models.md)에 있습니다.
 3. 사용자가 모형 보정을 마치면, 보정값을 넣고 거리 오차와 도로 IoU(직접 칠한 20프레임)를 잽니다.
 4. 3단계(카메라 4대)와 연산자 확인, FlashOcc 재학습은 쿼드 카메라와 x86 GPU 서버가 준비된 뒤에 합니다.
@@ -103,5 +107,6 @@ cd ~/Desktop/App/fsd_diff_npu && python ~/Desktop/App/fsd_agent.py --task-file d
 | 08 연속 실행과 지연, 녹화 | 6.64달러 |
 | 09 깊이와 세그 모델 비교 | 6.64달러 |
 | 10 3D 시점 렌더러 | 8.40달러 |
+| 11 추적기와 카메라 지연 | 5.87달러 |
 
-합계는 62.33달러에 끊긴 실행 한 번이 더해집니다. 실제 금액은 Console의 Cost 페이지가 기준입니다.
+합계는 68.20달러에 끊긴 실행 한 번이 더해집니다. 실제 금액은 Console의 Cost 페이지가 기준입니다.

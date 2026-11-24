@@ -238,13 +238,14 @@ class RealityViewPipeline:
         view: str = "bev",  # 화면 종류: "bev"(기본), "3d", "both"
         view3d: View3DConfig | None = None,  # 3D 시점 설정(없으면 기본값)
         ground_every: int = 1,  # 3D 바닥(IPM 텍스처)을 몇 프레임마다 다시 만들지. 1이면 매 프레임
+        tracker: str = "basic",  # 추적기 방식: "basic"(기본, 예전과 같음), "robust"(먼 물체 ID 쪼개짐 개선판)
     ):
         self.cameras = cameras
         self.scale = float(scale)
         self.backend = backend
         self.grid = grid or BevGrid()
         self.ipm = IpmCompositor(cameras, self.grid)
-        self.tracker = BevTracker(scale=self.scale)
+        self.tracker = BevTracker(scale=self.scale, mode=tracker)
         self.show_ground = show_ground
         self.show_cameras = show_cameras
         self.timer = timer or StageTimer(enabled=False)

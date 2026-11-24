@@ -50,6 +50,11 @@ class SimWorld:
         self.s = 0.0  # 자차 누적 이동거리 (차선 점선 스크롤용)
         self.t = 0.0
         self.gt: list[list[Detection]] = []
+        # gt와 같은 모양으로, 각 정답 박스가 objects의 몇 번째 물체인지 적는다(추적 평가용).
+        # SimBackend는 이 값을 쓰지 않으므로 잡음 난수의 순서는 예전과 같다
+        self.gt_ids: list[list[int]] = []
+        # 물체가 반대편으로 다시 등장한 횟수(물체마다). 다시 등장하면 평가에서 다른 물체로 본다
+        self.wraps: list[int] = [0] * len(self.objects)
         self.gt_masks: list[np.ndarray] = []
         self._rays = []
         for cam in cameras:
@@ -61,14 +66,16 @@ class SimWorld:
     def step(self, dt: float) -> None:
         self.t += dt
         self.s += self.ego_speed * dt
-        for o in self.objects:
+        for i, o in enumerate(self.objects):
             o.x += o.vx * dt
             o.y += o.vy * dt
             # 너무 멀어지면 반대편에서 다시 등장
             if o.x > 45:
                 o.x = -35
+                self.wraps[i] += 1
             elif o.x < -35:
                 o.x = 45
+                self.wraps[i] += 1
 
     # ---- 렌더링 -------------------------------------------------------
     def _ground_color(self, X: np.ndarray, Y: np.ndarray) -> np.ndarray:
@@ -93,21 +100,28 @@ class SimWorld:
         return img
 
     def render(self) -> list[np.ndarray]:
-        frames, self.gt, self.gt_masks = [], [], []
+        frames, self.gt, self.gt_ids, self.gt_masks = [], [], [], []
         for cam, (xy, valid) in zip(self.cameras, self._rays):
             img = self._ground_color(xy[..., 0], xy[..., 1])
             img[~valid] = SKY
             occl = np.zeros(img.shape[:2], np.uint8)
-            dets = []
-            order = sorted(self.objects, key=lambda o: -np.hypot(o.x - cam.position[0], o.y - cam.position[1]))
-            for o in order:
+            dets, ids = [], []
+            # 먼 물체부터 그려서 가까운 물체가 위에 덮이게 한다(번호는 objects 순서 그대로 기억)
+            order = sorted(
+                range(len(self.objects)),
+                key=lambda i: -np.hypot(self.objects[i].x - cam.position[0], self.objects[i].y - cam.position[1]),
+            )
+            for i in order:
+                o = self.objects[i]
                 box = self._draw_object(img, cam, o, occl)
                 if box is not None:
                     dets.append(Detection(o.label, 0.9, box))
+                    ids.append(i)
             road = valid & (np.abs(xy[..., 1]) <= ROAD_HALF) & (occl == 0)
             self.gt_masks.append(road.astype(np.uint8))
             frames.append(img)
             self.gt.append(dets)
+            self.gt_ids.append(ids)
         return frames
 
     def _draw_object(self, img: np.ndarray, cam: Camera, o: SimObject, occl: np.ndarray):
