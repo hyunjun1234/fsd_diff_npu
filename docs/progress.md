@@ -70,7 +70,7 @@ cd ~/Desktop/App/fsd_diff_npu && python ~/Desktop/App/fsd_agent.py --task-file d
 2. DX-M1 방열팬을 단 뒤 깊이 모델(yolo26-depth-n 추천, 대안 fastdepth)을 별도 스레드로 파이프라인에 붙입니다. 모델 비교는 [09 측정 문서](measurements/09_npu_models.md)에 있습니다.
 3. 사용자가 모형 보정을 마치면, 보정값을 넣고 거리 오차와 도로 IoU(직접 칠한 20프레임)를 잽니다.
 4. 3단계(카메라 4대)와 연산자 확인, FlashOcc 재학습은 쿼드 카메라와 x86 GPU 서버가 준비된 뒤에 합니다.
-5. 차량 장착 전 준비는 [07 문서](07_vehicle_mount_and_training_plan.md) 11장 순서를 따릅니다. 학습 서버 GPU는 Hailo DFC 조건상 RTX 40 계열 이하여야 합니다.
+5. 차량 장착 전 준비는 [07 문서](07_vehicle_mount_and_training_plan.md) 11장 순서를 따릅니다. 학습과 변환은 사용자 데스크탑(RTX 4070, Windows)의 WSL2에서 하며 설치 순서는 같은 문서 6.3절에 있습니다.
 
 ## 사용자가 해야 할 일
 

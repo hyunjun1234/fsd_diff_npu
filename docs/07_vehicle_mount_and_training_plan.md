@@ -28,7 +28,7 @@ FSD v12부터는 영상에서 바로 조향과 가속을 내는 엔드투엔드 
 
 됩니다. 지금 파이에서 돌리는 YOLOv8s 검출과 BiSeNetV2 세그는 COCO, Cityscapes 같은 공개 데이터로 학습된 모델이고, 우리 차량 영상으로 미세조정한 뒤 다시 NPU용으로 변환하면 됩니다. 두 NPU 회사 모두 이 흐름을 공식으로 안내합니다. Hailo Model Zoo는 모델마다 재학습 안내(도커 환경, 학습, 내보내기)를 제공하고 [H1], DEEPX는 ONNX와 설정 파일과 보정 이미지로 .dxnn을 만드는 흐름을 안내합니다 [D1].
 
-주의할 점이 세 가지 있습니다. 첫째, 학습과 변환은 파이에서 할 수 없고 x86 리눅스 PC가 필요합니다(6장). 둘째, Ultralytics YOLO는 AGPL-3.0이라 결과물을 공개하지 않는 상업 용도에는 별도 라이선스가 필요합니다 [U1]. 개인 연구 프로젝트에서는 문제 되지 않습니다. 셋째, FlashOcc처럼 3D 점유를 내는 모델은 nuScenes의 라이다 기반 정답으로 학습되고 깊이 감독도 라이다를 씁니다 [B1]. 라이다가 없는 우리 차에서는 같은 품질의 정답을 만들기 어려워, 추가 학습은 2D 검출과 세그부터 하는 것이 맞습니다.
+주의할 점이 세 가지 있습니다. 첫째, 학습과 변환은 파이에서 할 수 없고 x86 리눅스 환경이 필요합니다. 사용자 데스크탑의 Windows에서는 WSL2로 마련합니다(6장). 둘째, Ultralytics YOLO는 AGPL-3.0이라 결과물을 공개하지 않는 상업 용도에는 별도 라이선스가 필요합니다 [U1]. 개인 연구 프로젝트에서는 문제 되지 않습니다. 셋째, FlashOcc처럼 3D 점유를 내는 모델은 nuScenes의 라이다 기반 정답으로 학습되고 깊이 감독도 라이다를 씁니다 [B1]. 라이다가 없는 우리 차에서는 같은 품질의 정답을 만들기 어려워, 추가 학습은 2D 검출과 세그부터 하는 것이 맞습니다.
 
 ### 1.4 학습이 끝난 모델을 계속 학습시킬 수 있나
 
@@ -111,11 +111,46 @@ Hailo-8 칩은 일반 소비전력 2.5W [N1], DX-M1 M.2 모듈은 최대 5W입�
 
 ## 6. 학습 서버
 
-Hailo Dataflow Compiler는 Ubuntu 22.04나 24.04 64비트(WSL2 가능)와 NVIDIA GPU(compute capability 6.1~8.9, VRAM 8GB 이상, 16GB 권장)를 요구합니다 [H3]. GPU가 없어도 돌지만 최적화 수준이 0으로 떨어져 실사용 모델에는 권하지 않습니다 [H3]. compute capability 8.9는 RTX 40 계열까지이고, 블랙웰 세대(10.0, 12.0)는 지원하지 않는다고 명시돼 있습니다 [H3]. 그래서 RTX 50 계열 PC는 Hailo 변환에 쓸 수 없습니다. 또 Model Zoo의 master 브랜치는 Hailo-10과 15 전용이고, Hailo-8은 v2.x 브랜치와 DFC 3.x를 써야 합니다 [H1].
+### 6.1 요구 조건
 
-DEEPX DX-COM은 x86_64 전용이고 Ubuntu 20.04~26.04 등을 지원하며 GPU는 필수가 아닙니다 [D1][D2].
+Hailo-8용 모델 변환에는 Model Zoo v2.x 브랜치(최신 v2.17)와 Dataflow Compiler 3.33.0을 씁니다 [H1]. master 브랜치는 Hailo-10H용(DFC 5.x)입니다 [H3]. 파이에 설치된 HailoRT 4.23.0이 v2.17이 요구하는 버전과 같으므로 [H1] 이 조합을 그대로 씁니다. v2.17이 요구하는 환경은 Ubuntu 22.04나 24.04 64비트(Windows에서는 WSL2 지원), Python 3.10~3.12, NVIDIA 드라이버 525 이상, CUDA 12.5.1, cuDNN 9.10입니다 [H1]. GPU가 없어도 돌지만 최적화 수준이 0으로 떨어져 실사용 모델에는 권하지 않습니다 [H3].
 
-두 컴파일러가 모두 x86 전용이므로 Jetson Orin 같은 ARM 보드로 바꿔도 Hailo와 DX-M1 모델 변환은 여전히 x86 PC에서 해야 합니다(DX-COM은 x86_64 전용 확인 [D2], DFC의 ARM 지원 여부는 확인 필요). 학습 서버는 RTX 40 계열 이하 GPU가 달린 x86 Ubuntu PC 한 대로 학습, 자동 라벨링, 두 NPU 변환을 모두 하는 구성이 가장 단순합니다. 클라우드 GPU를 빌릴 때도 같은 조건(compute capability 8.9 이하)을 확인합니다.
+GPU 세대는 문서마다 다릅니다. master 문서는 compute capability 6.1~8.9(파스칼부터 에이다 러브레이스까지), VRAM 8GB 이상(16GB 권장)을 적고 블랙웰은 지원하지 않는다고 명시합니다 [H3]. 그런데 Hailo-8용 v2.17 문서에는 파스칼, 튜링, 암페어만 적혀 있고 에이다(RTX 40 계열)는 없습니다 [H1]. 그래서 RTX 40 계열에서 DFC 3.33.0이 GPU로 최적화하는지는 직접 돌려 보고 확인해야 합니다. RTX 50 계열(블랙웰)은 두 문서 기준 모두 지원 대상이 아닙니다.
+
+DEEPX DX-COM은 x86_64 리눅스 전용이고 GPU는 필수가 아닙니다 [D1][D2]. Windows와 WSL에 대한 언급은 없습니다 [D2][D3].
+
+두 컴파일러가 모두 x86 기준이므로 Jetson Orin 같은 ARM 보드로 바꿔도 Hailo와 DX-M1 모델 변환은 x86 PC에서 해야 합니다(DX-COM은 x86_64 전용 확인 [D2], DFC의 ARM 지원 여부는 확인 필요).
+
+### 6.2 사용자 데스크탑으로 충분한가
+
+사용자 데스크탑은 RTX 4070(12GB), Ryzen 7950X3D, RAM 64GB, Windows입니다. 별도 GPU 서버 없이 이 데스크탑 한 대로 학습, 자동 라벨링, 두 NPU 변환을 모두 하는 것으로 계획합니다.
+
+| 항목 | 판단 |
+|---|---|
+| YOLO 미세조정 | 충분 |
+| 자동 라벨링 | 충분 |
+| DX-COM 변환 | WSL2 동작 확인 필요 |
+| Hailo DFC 변환 | GPU 가속 확인 필요 |
+| FlashOcc 재학습 | 확인 필요 |
+
+RTX 4070은 compute capability 8.9입니다 [W3]. master 문서의 범위 안이고 VRAM 12GB는 최소 8GB를 넘지만 권장 16GB에는 못 미칩니다 [H3]. Hailo-8용 v2.17 문서에 에이다가 없다는 점은 6.1절과 같습니다. GPU로 안 되면 CPU 최적화(수준 0)로 먼저 변환해 정확도 하락을 재 보고, 하락이 크면 그때 대책을 정합니다. FlashOcc를 12GB에서 학습할 수 있는지는 공개 자료로 확인하지 못했고, 배치 크기를 줄여 시도해 봐야 합니다. Grounding DINO와 SAM 2, Depth Anything V2 Small은 파라미터 수가 크지 않아(SAM 2.1 large 224.4M [A2], Depth Anything V2 Small 24.8M [A5]) 12GB에서 추론으로 돌리는 데 무리가 없을 것으로 보지만 실측 필요입니다.
+
+WSL2는 기본으로 Windows 메모리의 50%를 가져가므로 [W4] 64GB면 32GB가 리눅스 쪽에 잡힙니다. 변환과 학습에는 이 값을 늘려 둡니다(6.3절 3번).
+
+### 6.3 설치 순서
+
+Hailo는 공식으로 WSL2를 지원하므로 [H1] WSL2 Ubuntu를 먼저 시도하고, DX-COM이 WSL2에서 문제가 생기면 그때 Ubuntu 듀얼 부팅으로 바꿉니다.
+
+1. Windows용 NVIDIA 드라이버를 최신으로 설치합니다. WSL 안에는 리눅스용 NVIDIA 드라이버를 설치하면 안 되며, `cuda-drivers`나 `nvidia-open` 패키지도 설치하지 않습니다 [W2].
+2. 관리자 PowerShell에서 `wsl --install`을 실행하고 재부팅합니다. 이 명령은 WSL 기능을 켜고 Ubuntu를 설치합니다 [W1]. 설치된 Ubuntu가 22.04나 24.04인지 `lsb_release -a`로 확인합니다.
+3. `%UserProfile%\.wslconfig`에 `[wsl2]` 항목을 만들고 `memory=48GB`처럼 메모리를 늘린 뒤 `wsl --shutdown`으로 다시 시작합니다 [W4]. 48GB는 Windows 쪽에 16GB를 남기기 위한 값이며 DFC와 학습의 실제 필요량은 확인 필요입니다.
+4. WSL 안에서 `nvidia-smi`로 GPU가 보이는지 확인하고, Hailo 요구에 맞춰 CUDA 12.5와 cuDNN 9.10을 설치합니다 [H1]. CUDA는 툴킷만 설치합니다 [W2].
+5. Hailo 환경: Python 3.10 가상환경을 만들고, Hailo 개발자 사이트에서 Dataflow Compiler 3.33.0 휠을 받아 설치한 뒤(로그인 필요, 확인 필요), Model Zoo를 v2.17로 받아 `pip install -e .`로 설치합니다 [H1]. 파이에 있는 YOLOv8s를 `hailomz parse`, `optimize`, `compile`로 다시 만들어 HEF가 나오는지, 로그에 GPU를 쓴다고 나오는지 봅니다.
+6. DEEPX 환경: 별도 가상환경에 dx-all-suite 안내대로 DX-COM을 설치합니다 [D3]. 지금 쓰는 YOLOv8s를 .dxnn으로 다시 만들어 파이에서 기존 결과와 같은지 비교합니다. 설치가 안 되면 DEEPX의 Ubuntu 24.04 도커 스크립트 [D3]나 듀얼 부팅으로 넘어갑니다.
+7. 학습 환경: 또 다른 가상환경에 CUDA에 맞는 PyTorch를 먼저 설치하고 `pip install -U ultralytics`를 설치합니다 [U4]. Hailo 변환 환경과 학습 환경은 패키지 버전이 부딪힐 수 있어 나눠 둡니다.
+8. 자동 라벨링 환경: Grounded-SAM-2와 CVAT를 설치합니다. CVAT는 도커 컴포즈로 돌리므로 Windows의 Docker Desktop에서 WSL2 백엔드를 쓰는 방식이 간단합니다(확인 필요).
+
+듀얼 부팅으로 바꿀 때는 Ubuntu 22.04를 별도 SSD에 설치하는 쪽이 Windows 쪽을 건드리지 않아 안전합니다. 순서는 위 4~8번과 같고, 1번 대신 리눅스용 NVIDIA 드라이버를 설치합니다.
 
 ## 7. 데이터 수집
 
@@ -197,7 +232,7 @@ Hailo는 ONNX를 parse, optimize(보정 이미지로 INT8 양자화), compile �
 ## 11. 준비 순서
 
 1. 책상에서: 두 NPU 방열 장착, USB 전력계로 소비전력 측정, 12V 강압 컨버터와 `PSU_MAX_CURRENT` 설정 시험, ACC 꺼짐을 흉내 낸 안전 종료 시험.
-2. 학습 서버 마련: RTX 40 계열 이하 GPU가 달린 x86 Ubuntu PC를 정하고, 지금 쓰는 YOLOv8s를 그대로 HEF와 .dxnn으로 다시 만들어 파이 결과와 같은지 확인합니다.
+2. 학습 환경 마련: 데스크탑에 6.3절 순서로 WSL2 환경을 만들고, 지금 쓰는 YOLOv8s를 그대로 HEF와 .dxnn으로 다시 만들어 파이 결과와 같은지 확인합니다.
 3. 정차 상태 장착: 주차장에서 카메라 4대를 유리 안쪽에 붙이고 배선한 뒤 외부 보정을 합니다.
 4. 녹화 전용 주행: 동승자가 조작하고 추론 없이 녹화만 합니다.
 5. 차 밖 처리: 녹화 영상으로 `--replay` 실행, 자동 라벨링, 첫 미세조정 회차를 돌립니다.
@@ -231,9 +266,10 @@ Hailo는 ONNX를 parse, optimize(보정 이미지로 INT8 양자화), compile �
 - C1: [Parisi 외, Continual Lifelong Learning with Neural Networks: A Review, arXiv 1802.07569](https://arxiv.org/abs/1802.07569)
 - D1: [DEEPX dx-all-suite, Running Your First NPU Model](https://github.com/DEEPX-AI/dx-all-suite/blob/main/docs/source/03_Running_Your_First_NPU_Model.md)
 - D2: [DEEPX dx-compiler, GitHub](https://github.com/DEEPX-AI/dx-compiler)
+- D3: [DEEPX dx-all-suite, Setting Up Environment](https://github.com/DEEPX-AI/dx-all-suite/blob/main/docs/source/02_Setting_Up_Environment.md)
 - E1: [Study: Hot cars can hit deadly temperatures in as little as one hour, ASU News](https://news.asu.edu/20180516-discoveries-asu-study-hot-cars-can-hit-deadly-temperatures-within-one-hour)
 - E2: [Parked cars get dangerously hot, even on cool days, Stanford Medicine](https://med.stanford.edu/news/all-news/2005/07/parked-cars-get-dangerously-hot-even-on-cool-days-stanford-study-finds.html)
-- H1: [Hailo Model Zoo, GitHub](https://github.com/hailo-ai/hailo_model_zoo)
+- H1: [Hailo Model Zoo v2.17, Getting Started](https://github.com/hailo-ai/hailo_model_zoo/blob/v2.17/docs/GETTING_STARTED.rst), [Hailo Model Zoo, GitHub](https://github.com/hailo-ai/hailo_model_zoo)
 - H2: [Hailo AI Software Suite](https://hailo.ai/products/hailo-software/hailo-ai-software-suite/)
 - H3: [Hailo Model Zoo, Getting Started](https://github.com/hailo-ai/hailo_model_zoo/blob/master/docs/GETTING_STARTED.rst)
 - H4: [Model training GPU, Hailo Community](https://community.hailo.ai/t/model-training-gpu/13623)
@@ -258,4 +294,9 @@ Hailo는 ONNX를 parse, optimize(보정 이미지로 INT8 양자화), compile �
 - U1: [ultralytics/ultralytics, GitHub](https://github.com/ultralytics/ultralytics)
 - U2: [Ultralytics Train 문서](https://docs.ultralytics.com/modes/train/)
 - U3: [Ultralytics Model Training Tips](https://docs.ultralytics.com/guides/model-training-tips/)
+- U4: [Ultralytics Quickstart](https://docs.ultralytics.com/quickstart/)
+- W1: [Install WSL, Microsoft Learn](https://learn.microsoft.com/en-us/windows/wsl/install)
+- W2: [CUDA on WSL User Guide, NVIDIA](https://docs.nvidia.com/cuda/wsl-user-guide/index.html)
+- W3: [CUDA GPU Compute Capability, NVIDIA](https://developer.nvidia.com/cuda-gpus)
+- W4: [Advanced settings configuration in WSL, Microsoft Learn](https://learn.microsoft.com/en-us/windows/wsl/wsl-config)
 - V1: [SmallRig 4인치 흡착 마운트 4122C](https://www.smallrig.com/4-Suction-Cup-Camera-Mounting-Support-for-Vehicle-Shooting-4122C.html)
