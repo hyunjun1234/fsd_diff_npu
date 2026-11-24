@@ -241,6 +241,22 @@ class ReplaySource:
         self._cache.clear()
 
 
+def open_replay_sources(folder: str, cams: list[Camera]) -> list:
+    """--replay 폴더에 맞는 재생 소스를 카메라마다 만든다.
+
+    - 주행 녹화 회차 폴더(seg_* 하위 폴더)나 세그먼트 폴더, 트리거 클립 폴더처럼 {이름}.mjpeg 와 {이름}.csv 가
+      있으면 녹화 시각으로 카메라를 짝지어 읽는다(realityview/mjpeg.py).
+    - 그렇지 않으면 예전처럼 '{이름}_*.png|jpg' 이미지를 차례로 읽는다.
+    """
+    import os
+
+    from .mjpeg import has_mjpeg, open_mjpeg_sources, segment_dirs
+
+    if any(all(has_mjpeg(d, c.name) for c in cams) for d in segment_dirs(folder) if os.path.isdir(d)):
+        return open_mjpeg_sources(folder, cams)
+    return [ReplaySource(folder, c.name, c.width, c.height) for c in cams]
+
+
 # ---------------------------------------------------------------------------
 # 설정에서 입력 장치 열기
 # ---------------------------------------------------------------------------

@@ -52,6 +52,12 @@ from realityview.profiling import (  # noqa: E402
 #   # 3D 시점(자차 뒤쪽 위에서 내려다봄). both는 탑뷰와 3D를 나란히. 기본은 지금처럼 bev
 #   python scripts/run_demo.py --backend sim --view 3d --view3d-interp --frames 150 --save out/sim3d.mp4 --headless
 #
+#   # 주행 녹화 회차를 그대로 재생하면서 트리거 클립을 모으고, DX-M1에서 섀도 회차 모델을 같이 돌려 비교
+#   # (docs/drive_recording.md. DX-M1은 방열 전이라 30초 이내)
+#   timeout -s INT -k 10 40 python scripts/run_demo.py --config configs/two_cam_current.yaml --backend hailo \
+#       --replay out/drives/20261125_101500 --headless --duration 25 --trigger-clips --shadow \
+#       --shadow-csv out/measure/shadow.csv --health-csv out/measure/shadow_health.csv --health-interval 10 --hailo-stop-temp 95
+#
 #   # PC에서 녹화 영상으로 개발 (ultralytics 필요)
 #   python scripts/run_demo.py --backend ultralytics --video front=rec/front.mp4 --video rear=rec/rear.mp4
 
@@ -141,8 +147,27 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument(
         "--replay",
         default=None,
-        help="카메라 대신 이 폴더의 '{카메라 이름}_*.png|jpg' 이미지를 차례로 넣음(끝나면 처음부터). 예: out/rec/room_100",
+        help="카메라 대신 저장 영상을 넣음(끝나면 처음부터). 주행 녹화 회차나 세그먼트 폴더, 트리거 클립 폴더({카메라}.mjpeg), "
+        "또는 '{카메라 이름}_*.png|jpg' 이미지 폴더. 예: out/drives/20261125_101500, out/rec/room_100",
     )
+    # ---- 트리거 클립(기본 꺼짐, docs/drive_recording.md) ----
+    ap.add_argument("--trigger-clips", action="store_true", help="애매한 점수, 새 ID와 바뀐 ID, 두 NPU 불일치 순간의 앞뒤 원본을 저장")
+    ap.add_argument("--trigger-dir", default="out/triggers", help="트리거 클립 저장 폴더. 기본 out/triggers")
+    ap.add_argument("--trigger-pre", type=float, default=2.0, help="트리거 앞쪽으로 남길 시간(초). 기본 2")
+    ap.add_argument("--trigger-post", type=float, default=2.0, help="트리거 뒤쪽으로 남길 시간(초). 기본 2")
+    ap.add_argument("--trigger-cooldown", type=float, default=10.0, help="같은 종류 트리거 사이 최소 간격(초). 기본 10")
+    ap.add_argument("--trigger-score", default="0.3,0.5", help="애매한 점수 범위 '하한,상한'(하한 이상 상한 미만). 기본 0.3,0.5")
+    ap.add_argument("--trigger-switch-dist", type=float, default=2.0, help="ID가 바뀐 것으로 볼 거리(m, 실차). 기본 2")
+    ap.add_argument("--trigger-mismatch", type=int, default=1, help="--shadow에서 짝 못 찾은 상자가 이 수 이상이면 트리거. 기본 1")
+    ap.add_argument("--trigger-buffer-mb", type=float, default=300.0, help="링 버퍼 최대 메모리(MB). 기본 300")
+    # ---- 섀도 실행(기본 꺼짐): 같은 프레임을 다른 NPU의 다른 회차 모델로 돌려 차이를 csv로 ----
+    ap.add_argument(
+        "--shadow",
+        action="store_true",
+        help="--backend hailo면 DX-M1, dxm1이면 Hailo에서 설정 models.shadow_model_round 모델을 같이 돌림. 화면과 추적은 기본 모델만",
+    )
+    ap.add_argument("--shadow-csv", default="out/measure/shadow.csv", help="프레임별 비교 csv 경로. 기본 out/measure/shadow.csv")
+    ap.add_argument("--shadow-iou", type=float, default=0.5, help="두 결과의 상자를 같은 물체로 볼 IoU. 기본 0.5")
     # ---- CSI 카메라 지연 시험 옵션(기본은 모두 설정 파일 값 그대로) ----
     ap.add_argument("--cam-fps", type=float, default=None, help="Picamera2 프레임레이트를 이 값으로 덮어씀. 예: 25")
     ap.add_argument("--cam-buffers", type=int, default=None, help="Picamera2 buffer_count. 기본은 Picamera2 값(6)")
@@ -286,6 +311,65 @@ def make_recorder(args, frames_so_far: int, elapsed_s: float):
 
 
 # ---------------------------------------------------------------------------
+# 회차 모델, 트리거 점수 범위, 섀도 백엔드
+# ---------------------------------------------------------------------------
+def parse_score_range(ap, text: str) -> tuple[float, float]:
+    """'0.3,0.5' 를 (0.3, 0.5)로. 하한 < 상한, 0~1 범위가 아니면 명령줄 오류."""
+    try:
+        lo, hi = (float(v) for v in text.split(","))
+    except ValueError:
+        ap.error(f"--trigger-score 는 '하한,상한' 형식입니다: {text}")
+    if not (0.0 <= lo < hi <= 1.0):
+        ap.error(f"--trigger-score 는 0 <= 하한 < 상한 <= 1 이어야 합니다: {text}")
+    return lo, hi
+
+
+def detector_npu(args, cfg: dict, npu: dict, trig_lo: float) -> tuple[dict, int | None]:
+    """검출 백엔드에 넘길 npu 설정 사본과 기본 회차 번호.
+
+    - 모델 경로: --det-hef(Hailo만) > models.det_model_round 회차 > npu.det_hef / npu.dx_det_model
+    - --trigger-clips: 애매한 점수 하한까지 보려고 백엔드 점수 문턱을 min(score_thr, 하한)으로 낮춘다.
+      화면과 추적에는 ScoreTap이 원래 문턱 이상만 넘기므로 결과는 그대로다.
+    """
+    from realityview.model_rounds import primary_det_model
+
+    out = dict(npu)
+    rnd = None
+    if args.backend in ("hailo", "dxm1"):
+        path, rnd = primary_det_model(cfg, args.backend)
+        key = "det_hef" if args.backend == "hailo" else "dx_det_model"
+        if path:
+            out[key] = path
+        if args.backend == "hailo" and args.det_hef:
+            out[key], rnd = args.det_hef, None
+        if args.trigger_clips:
+            out["score_thr"] = min(float(npu.get("score_thr", 0.4)), float(trig_lo))
+    return out, rnd
+
+
+def make_shadow_backend(args, cfg: dict, npu: dict, primary, camera_names):
+    """기본 백엔드의 반대쪽 NPU에 섀도 회차 모델을 올린다. 섀도 쪽 시간은 --profile 표에 섞이지 않게 따로 둔다."""
+    from realityview.model_rounds import shadow_det_model
+    from realityview.shadow import ShadowBackend
+
+    other = "dxm1" if args.backend == "hailo" else "hailo"
+    path, rnd = shadow_det_model(cfg, other)
+    if not path:
+        raise SystemExit(f"섀도 모델 경로가 없습니다. 설정에 models 항목이나 npu.{'dx_det_model' if other == 'dxm1' else 'det_hef'} 를 적으세요")
+    quiet = StageTimer(enabled=False)
+    if other == "dxm1":
+        # 세그 모델은 올리지 않는다(검출 비교만)
+        sh = make_dxm1_backend(dict(npu, dx_det_model=path, dx_seg_model=None), quiet, det=True)
+    else:
+        from realityview.detectors import HailoBackend
+
+        sh = HailoBackend(path, None, score_thr=float(npu.get("score_thr", 0.4)), timer=quiet)
+    sb = ShadowBackend(primary, sh, args.shadow_csv, camera_names, iou_thr=args.shadow_iou)
+    sb.shadow_round, sb.shadow_path = rnd, path
+    return sb
+
+
+# ---------------------------------------------------------------------------
 # 실행
 # ---------------------------------------------------------------------------
 def main() -> None:
@@ -297,11 +381,19 @@ def main() -> None:
     if args.hailo_stop_temp > 0 and not args.health_csv:
         # 온도는 --health-csv 기록 때만 읽으므로, 없으면 멈춤 조건이 조용히 꺼진다. 미리 알려 준다
         ap.error("--hailo-stop-temp 는 --health-csv 와 같이 써야 합니다")
+    if args.shadow and args.backend not in ("hailo", "dxm1"):
+        ap.error("--shadow 는 --backend hailo 나 dxm1 과 같이 써야 합니다(다른 NPU에서 섀도 모델을 돌림)")
+    if args.shadow and args.seg_npu != "none":
+        # DX-M1에 세그와 섀도 검출을 함께 올리면 방열 없는 지금 상태에서 너무 뜨거워지고 비교 조건도 달라진다
+        ap.error("--shadow 와 --seg-npu 는 같이 쓸 수 없습니다")
+    trig_lo, trig_hi = parse_score_range(ap, args.trigger_score)
 
     cams, grid, cfg = load_config(args.config)
     if args.bev_res:
         grid = dataclasses.replace(grid, res=float(args.bev_res))
     npu = cfg.get("npu", {})
+    # 검출 백엔드에 넘길 npu 설정. 회차 모델(models.det_model_round)과 트리거용 낮은 점수 문턱을 여기서 반영한다
+    det_npu, det_round = detector_npu(args, cfg, npu, trig_lo)
     timer = StageTimer(enabled=args.profile, warmup=args.warmup)
     health_start = read_pi_health() if args.profile else {}
 
@@ -314,16 +406,16 @@ def main() -> None:
         world = SimWorld(cams)
         backend = SimBackend(world)
     else:
-        from realityview.sources import ReplaySource, open_source
+        from realityview.sources import open_replay_sources, open_source
 
         overrides = dict(v.split("=", 1) for v in args.video)
         cam_ov = camera_override(args)
         try:
-            for c in cams:
-                if args.replay:
-                    # 저장 이미지 재생: 카메라를 열지 않는다
-                    sources.append(ReplaySource(args.replay, c.name, c.width, c.height))
-                elif c.name in overrides:
+            if args.replay:
+                # 저장 영상 재생: 카메라를 열지 않는다. 주행 녹화(.mjpeg)와 이미지 폴더 모두 받는다
+                sources.extend(open_replay_sources(args.replay, cams))
+            for c in ([] if args.replay else cams):
+                if c.name in overrides:
                     sources.append(open_source(c, {"type": "opencv", "uri": overrides[c.name]}))
                 else:
                     # --cam-* 옵션은 CSI 카메라(picamera2)에만 덮어쓴다
@@ -338,16 +430,16 @@ def main() -> None:
             from realityview.detectors import HailoBackend
 
             backend = HailoBackend(
-                args.det_hef or npu["det_hef"],
+                det_npu["det_hef"],
                 npu.get("seg_hef"),
-                score_thr=float(npu.get("score_thr", 0.4)),
+                score_thr=float(det_npu.get("score_thr", 0.4)),
                 road_classes=npu.get("road_classes", [0]),
                 seg_every=int(npu.get("seg_every", 3)),
                 timer=timer,
             )
         elif args.backend == "dxm1":
             try:
-                backend = make_dxm1_backend(npu, timer, det=True)
+                backend = make_dxm1_backend(det_npu, timer, det=True)
             except BaseException:
                 # 모델 파일이 없어 실패해도 이미 연 카메라는 놓아 준다
                 for s in sources:
@@ -374,6 +466,27 @@ def main() -> None:
             from realityview.sim import ForcedMaskSeg
 
             seg_backend = ForcedMaskSeg(seg_backend, fraction=0.5)
+
+    # ---- 트리거용 낮은 점수 상자 엿보기와 섀도 실행(옵션을 켰을 때만 백엔드를 감싼다) ----
+    tap = None
+    shadow = None
+    if args.trigger_clips and args.backend in ("hailo", "dxm1"):
+        from realityview.shadow import ScoreTap
+
+        # 백엔드는 낮은 문턱으로 돌고, 파이프라인에는 원래 문턱(npu.score_thr) 이상만 간다
+        backend = tap = ScoreTap(backend, float(npu.get("score_thr", 0.4)))
+    if args.shadow:
+        try:
+            shadow = make_shadow_backend(args, cfg, npu, backend, [c.name for c in cams])
+        except BaseException:
+            for s in sources:
+                s.close()
+            backend.close()
+            raise
+        backend = shadow
+    if det_round is not None or shadow is not None:
+        print(f"검출 모델 회차: 기본 {det_round} ({args.backend})"
+              + (f", 섀도 {shadow.shadow_round} ({shadow.shadow_path})" if shadow is not None else ""), flush=True)
 
     pipe = RealityViewPipeline(
         cams,
@@ -408,6 +521,20 @@ def main() -> None:
         latency = LatencyRecorder([c.name for c in cams], warmup=args.warmup)
     recorder = None
     rec_stats = None
+    clipper = None
+    trig_stats = None
+    cam_names = [c.name for c in cams]
+    if args.trigger_clips:
+        from realityview.triggers import TrackIdWatcher, TriggerClipper, ambiguous_event, mismatch_event
+
+        clipper = TriggerClipper(
+            args.trigger_dir, cam_names, pre_s=args.trigger_pre, post_s=args.trigger_post,
+            cooldown_s=args.trigger_cooldown, max_buffer_mb=args.trigger_buffer_mb,
+        )
+        scale = float((cfg.get("scene") or {}).get("scale", 1.0))
+        id_watch = TrackIdWatcher(switch_dist=args.trigger_switch_dist * scale)
+        if shadow is None:
+            print("트리거 클립: 두 NPU 불일치(npu_mismatch) 트리거는 --shadow 를 같이 줄 때만 동작합니다", flush=True)
     health = None
     if args.health_csv:
         # Hailo 백엔드면 칩 온도 열을 더한다(방열 없이 오래 돌리면 Hailo-8이 먼저 뜨거워진다)
@@ -453,6 +580,15 @@ def main() -> None:
                 sensor_hist.pop(n - 256, None)  # 세그 마스크를 찾는 데 필요한 만큼만 남긴다
                 seg_ns = sensor_hist.get(pipe.last_mask_idx) if pipe.last_mask_idx is not None else None
                 latency.add(sensor_ns, read_done, done_ns, seg_ns)
+            # 트리거 클립: 원본을 링 버퍼에 넣고, 이번 프레임에서 나온 트리거를 넘긴다
+            if clipper is not None:
+                t_now = time.monotonic()
+                clipper.push(n, frames, t_now)
+                events = [ambiguous_event(n, tap.last_raw if tap is not None else out.results, cam_names, trig_lo, trig_hi)]
+                events += id_watch.update(n, out.tracks)
+                if shadow is not None:
+                    events.append(mismatch_event(n, shadow.last_rows, args.trigger_mismatch))
+                clipper.fire([e for e in events if e is not None], t_now)
             ndet = sum(len(r.detections) for r in out.results)
             det_total += ndet
             det_frames += int(ndet > 0)
@@ -499,13 +635,20 @@ def main() -> None:
             loop["measured_renders"] = pipe.render_count - renders0
         if health is not None:
             health.close()
+        if clipper is not None:
+            # 모으던 클립까지 저장하고 쓰기 스레드를 끝낸다
+            trig_stats = clipper.close()
+            print(f"trigger_stats={json.dumps(trig_stats, ensure_ascii=False)}", flush=True)
+        if shadow is not None:
+            print(f"shadow_summary={json.dumps(shadow.summary(), ensure_ascii=False)}", flush=True)
         if recorder is not None:
             # 큐에 남은 영상을 다 쓰고 닫는다. 측정 JSON에 녹화 결과를 같이 남기려고 먼저 닫는다
             rec_stats = recorder.close()
             print(f"녹화: {rec_stats}", flush=True)
         # 측정 결과는 장치를 닫기 전에 먼저 쓴다(닫다가 멈춰도 결과는 남게)
         if args.profile:
-            extra = {"det_frames": det_frames, "det_total": det_total, "record": rec_stats}
+            extra = {"det_frames": det_frames, "det_total": det_total, "record": rec_stats,
+                     "triggers": trig_stats, "shadow": shadow.summary() if shadow is not None else None}
             if latency is not None:
                 extra["latency"] = latency.summary()
             rep = profile_report(args, timer, pipe, health_start, loop, extra)

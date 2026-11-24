@@ -23,6 +23,10 @@
 
 센서에서 화면까지 지연(Hailo 단독, 평균 84.1ms, 26.1 FPS) 중 약 16ms는 Picamera2가 들고 있던 프레임이 묵은 몫입니다. `--cam-fps 20`이면 74.0ms, `--cam-queue off`면 67.9ms로 줄지만 FPS도 20.0, 15.0으로 떨어져 기본값은 그대로 둡니다. 카메라 앞에 사람이 없어도 `--replay 폴더`로 저장 이미지를 넣어 3D 화면의 사람 표시를 확인할 수 있습니다.
 
+## 차량 장착 전 준비
+
+주행 수집 도구를 만들었습니다. `scripts/record_drive.py`는 NPU 추론 없이 카메라 전부를 세그먼트 단위 MJPEG와 타임스탬프 csv로 녹화하고(카메라 2대 30fps에서 누락 0, 한 시간 약 7.1GB), `run_demo.py --trigger-clips`는 애매한 점수, 추적 ID 변화, 두 NPU 불일치가 나온 순간을 앞뒤로 저장하며, `--shadow`는 두 NPU에 다른 회차 모델을 올려 비교합니다. 사용법은 [주행 녹화 문서](drive_recording.md)에 있습니다.
+
 ## 장비 구성
 
 라즈베리파이 5(Debian 13, 64비트)에 Seeed 듀얼 M.2 HAT로 Hailo-8과 DX-M1 4GB를 함께 달았고, 두 NPU 모두 PCIe Gen3 x1로 인식됩니다. 런타임은 HailoRT 4.23.0, DXRT 3.4.2이고, `dx_engine`은 파이 저장소의 `.venv`에만 있습니다.
@@ -80,7 +84,8 @@ cd ~/Desktop/App/fsd_diff_npu && python ~/Desktop/App/fsd_agent.py --task-file d
 4. 후방 Camera Module 3는 자동 초점이므로 보정과 시험 때 초점 고정 확인.
 5. 동시 실행 판정 기준 결정: 1단계 기록(14.2 FPS) 기준이면 통과, 같은 코드의 Hailo 단독(26.2 FPS) 기준이면 25% 낮습니다.
 6. 진짜 반대 배치(세그 Hailo, 검출 DX-M1)를 재려면 Hailo 도로 세그 HEF(예: Hailo Model Zoo의 stdc1)를 받을지 결정. 지금 배치(검출 Hailo, 세그 DX-M1)가 대용 비교에서 더 빨랐습니다.
-7. Hailo DFC와 DX-COM 컴파일, FlashOcc 학습이 필요해지면 x86 리눅스 GPU 서버 연결.
+7. 몇 시간씩 녹화하려면 SSD 장착(SD 카드로는 약 3.3시간), 차량에서 ACC 꺼짐에 맞춰 종료 신호를 보내는 전원 장치 설정.
+8. Hailo DFC와 DX-COM 컴파일, FlashOcc 학습이 필요해지면 x86 리눅스 GPU 서버 연결.
 
 ## 알려진 문제
 
@@ -109,5 +114,6 @@ cd ~/Desktop/App/fsd_diff_npu && python ~/Desktop/App/fsd_agent.py --task-file d
 | 09 깊이와 세그 모델 비교 | 6.64달러 |
 | 10 3D 시점 렌더러 | 8.40달러 |
 | 11 추적기와 카메라 지연 | 5.87달러 |
+| 12 주행 수집 도구 | 8.05달러 |
 
-합계는 68.20달러에 끊긴 실행 한 번이 더해집니다. 실제 금액은 Console의 Cost 페이지가 기준입니다.
+합계는 76.25달러에 끊긴 실행 한 번이 더해집니다. 실제 금액은 Console의 Cost 페이지가 기준입니다.

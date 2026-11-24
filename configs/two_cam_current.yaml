@@ -112,3 +112,17 @@ npu:
   dx_input_rgb: true                      # DEEPX dx_app 예제도 RGB로 넣는다(LetterboxPreprocessor, SimpleResizePreprocessor)
   dx_seg_channels_first: true             # 로짓 출력 모델일 때만 쓴다. BiSeNetV2는 클래스 번호라 상관없음
   dx_iou_thr: 0.45                        # CPU NMS의 IoU 기준
+
+# ---- 회차 모델(realityview/model_rounds.py, docs/drive_recording.md) ----
+# 추가 학습 회차마다 models/<det_name>_r<세 자리>.hef 와 .dxnn 을 만들어 두고 여기서 회차를 고른다.
+# 0회차는 이름 규칙 이전의 공개 사전학습 모델이라 경로를 직접 적는다(npu.det_hef, npu.dx_det_model과 같은 파일).
+# 이 항목을 지우면 예전처럼 npu.det_hef, npu.dx_det_model 을 쓴다.
+models:
+  dir: models
+  det_name: yolov8s
+  det_model_round: 0        # 화면과 추적에 쓰는 회차(--backend hailo면 hef, dxm1이면 dxnn)
+  shadow_model_round: 0     # --shadow 때 반대쪽 NPU에서 같이 돌려 비교할 회차
+  rounds:
+    0:
+      hef: models/yolov8s_h8.hef
+      dxnn: models/dxnn/yolov8-s_640x640_ppu.dxnn
