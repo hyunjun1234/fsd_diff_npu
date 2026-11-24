@@ -8,7 +8,7 @@
 
 | 항목 | 계획 |
 |---|---|
-| 연결 | 파이5의 PCIe 1레인에 듀얼 M.2 HAT(PCIe 스위치)를 달고 Hailo-8 M.2 모듈과 DX-M1 M.2 모듈을 함께 꽂습니다. 저장장치는 SD 카드나 USB SSD를 씁니다. |
+| 연결 | 파이5의 PCIe 1레인에 Seeed PCIe 3.0 to Dual M.2 HAT(103110065)를 달고 Hailo-8 M.2 모듈과 DX-M1(4GB) 모듈을 함께 꽂습니다. 저장장치는 SD 카드나 USB SSD를 씁니다. |
 | 카메라 | 처음에는 Camera Module 3 Wide 2대(전방, 후방)로 시작하고, 이후 동기화 쿼드 카메라 키트로 4대(전후좌우)까지 늘립니다. |
 | Hailo-8 역할 | 카메라별 객체 검출(YOLOv8s HEF). 기존 데모 코드가 이미 이 구성을 전제로 짜여 있습니다. |
 | DX-M1 역할 | 도로 세그멘테이션과 거리 보정용 깊이 추정. 2단계에서는 FlashOcc의 이미지 백본을 맡습니다. 온보드 메모리가 있어 큰 모델을 올리기 유리합니다. |
@@ -20,15 +20,13 @@
 
 ### 2.1 두 NPU를 한 대의 파이에 연결하는 방법
 
-라즈베리파이 5는 외부로 나오는 PCIe가 x1 한 레인뿐입니다. Raspberry Pi AI HAT+는 Hailo-8 칩이 보드에 납땜되어 있고 이 한 레인을 혼자 차지하므로, AI HAT+와 DX-M1을 동시에 쓸 수는 없습니다. 두 NPU를 함께 돌리려면 Hailo-8을 M.2 모듈 형태로 준비하고, PCIe 스위치가 들어간 듀얼 M.2 HAT에 DX-M1 모듈과 나란히 꽂아야 합니다.
+라즈베리파이 5는 외부로 나오는 PCIe가 x1 한 레인뿐이므로, PCIe 스위치가 들어간 듀얼 M.2 HAT로 이 레인을 두 NPU에 나눠 줍니다. 구성은 Seeed PCIe 3.0 to Dual M.2 HAT(103110065)의 두 슬롯에 Hailo-8 M.2 모듈과 DX-M1 4GB 모듈을 하나씩 꽂는 것입니다.
 
-후보는 Seeed의 PCIe 3.0 to Dual M.2 HAT입니다. ASMedia ASM2806 PCIe 3.0 스위치를 쓰고, M-key 슬롯 2개가 각각 PCIe 3.0 x1로 연결되며 2230부터 2280까지 길이를 받습니다. 가격은 45달러로 소개되었습니다 [P1]. Seeed 위키에는 이 보드에서 Hailo-8을 돌린 결과(PCIe 3.0에서 187 FPS)가 실려 있습니다 [P2]. 다만 Hailo는 이런 서드파티 스위치 보드를 공식 검증하지 않으며, FPC 케이블만으로는 여러 장치에 전원이 부족할 수 있고 일부 스위치는 NVMe에 맞춰져 있어 인식 문제가 생길 수 있다고 안내합니다 [P3]. SSD와 Hailo를 같은 스위치에 물렸을 때 Hailo가 인식되지 않았다는 사례도 있습니다 [P4]. 그래서 M.2 슬롯 두 개는 모두 NPU에 쓰고, 저장장치는 SD 카드나 USB SSD로 둡니다.
+이 보드는 ASMedia ASM2806 PCIe 3.0 스위치를 쓰고, M-key 슬롯 2개가 각각 PCIe 3.0 x1로 연결되며 2230부터 2280까지 길이를 받습니다 [P1]. Seeed 위키에는 이 보드에서 Hailo-8을 돌린 결과(PCIe 3.0에서 187 FPS)가 실려 있습니다 [P2]. 다만 Hailo는 이런 서드파티 스위치 보드를 공식 검증하지 않으며, FPC 케이블만으로는 여러 장치에 전원이 부족할 수 있고 일부 스위치는 NVMe에 맞춰져 있어 인식 문제가 생길 수 있다고 안내합니다 [P3]. SSD와 Hailo를 같은 스위치에 물렸을 때 Hailo가 인식되지 않았다는 사례도 있습니다 [P4]. 그래서 M.2 슬롯 두 개는 모두 NPU에 쓰고, 저장장치는 SD 카드나 USB SSD로 둡니다.
 
 대역폭은 문제가 되지 않을 것으로 봅니다. 두 NPU가 Gen3 x1(약 1GB/s)을 나눠 쓰더라도, 카메라 4대 입력을 10 FPS로 보내는 데 필요한 양은 약 21MB/s 수준입니다(모델 선정 문서 2.1절 계산). Hailo-8은 온보드 메모리가 없어 큰 모델을 돌리면 가중치를 계속 주고받는데, 이 계획에서는 Hailo-8에 작은 모델만 맡기므로 이 문제도 피합니다.
 
-DX-M1은 모듈 종류에 따라 크기와 메모리가 다릅니다. Radxa DX-M1M(2230/2242)은 파이5용 M.2 HAT에 그대로 들어가고, 일반 DX-M1은 별도 어댑터가 필요하다고 안내되어 있습니다 [P5]. 메모리도 4GB LPDDR5와 1GB LPDDR4X로 출처마다 다릅니다(02 문서). 가지고 계신 모듈이 어느 것인지 확인 필요입니다.
-
-듀얼 M.2 HAT가 끝내 안정적으로 동작하지 않으면 대안이 두 가지 있습니다. 하나는 파이 두 대에 NPU를 하나씩 달고 유선 이더넷으로 결과만 주고받는 방법이고, 다른 하나는 단계별로 한 NPU씩만 쓰는 방법입니다. 앞의 방법은 카메라 영상을 나눠 받아야 해서 동기화가 어려워지므로, 스위치 보드를 먼저 시도하는 것을 권합니다.
+DX-M1은 4GB 메모리 모듈을 씁니다. 3장에서 세그멘테이션, 깊이 추정, FlashOcc 백본처럼 가중치가 큰 모델을 DX-M1에 맡기는 근거가 이 온보드 메모리입니다.
 
 ### 2.2 전원과 발열
 
@@ -38,12 +36,12 @@ DX-M1은 모듈 종류에 따라 크기와 메모리가 다릅니다. Radxa DX-M
 
 | 구성 | 카메라 | 연결 | 덮는 범위 | 쓰는 단계 |
 |---|---|---|---|---|
-| 2대 | Camera Module 3 Wide 2대 (수평 102도, 수직 67도, 1080p50) [P6] | CSI0 전방, CSI1 후방 | 앞뒤 약 102도씩, 좌우 측면은 사각지대 | 0~2단계 |
-| 4대 | Arducam 12MP IMX708 쿼드 카메라 키트 (카메라당 수평 100도) [P7] | 4대를 2x2로 합친 한 프레임을 CSI 하나로 받음 | 100도 x 4 = 400도로 360도를 덮고 모서리에서 조금 겹침 | 3단계 이후 |
+| 2대 | Camera Module 3 Wide 2대 (수평 102도, 수직 67도, 1080p50) [P5] | CSI0 전방, CSI1 후방 | 앞뒤 약 102도씩, 좌우 측면은 사각지대 | 0~2단계 |
+| 4대 | Arducam 12MP IMX708 쿼드 카메라 키트 (카메라당 수평 100도) [P6] | 4대를 2x2로 합친 한 프레임을 CSI 하나로 받음 | 100도 x 4 = 400도로 360도를 덮고 모서리에서 조금 겹침 | 3단계 이후 |
 
 카메라 위치와 각도는 [configs/two_cam.yaml](../configs/two_cam.yaml)과 [configs/four_cam.yaml](../configs/four_cam.yaml)의 값을 출발점으로 씁니다. 차량 좌표는 X가 전방, Y가 좌측이고 원점은 뒷바퀴 축 중앙 바닥입니다. 4대 구성에서 전방은 1.3m 높이에서 12도, 후방은 1.1m 높이에서 15도, 좌우는 사이드미러 위치(1.05m)에서 30도 아래로 숙입니다. 좌우 카메라를 많이 숙이는 이유는 지면 투영 방식에서 차 바로 옆 바닥이 잘 보여야 거리 오차가 줄기 때문입니다. 테슬라는 카메라 7~8대를 쓰며(01 문서 6장), 이 계획의 4대는 그중 전방 와이드, 후방, 좌우 리피터 위치를 대신하는 최소 구성입니다.
 
-쿼드 키트에는 주의할 점이 있습니다. 4대를 켜면 카메라당 해상도가 1152x648로 줄고 프레임레이트가 절반이 됩니다. 또 제품 페이지에 4대 전체가 하드웨어 동기화된다고 적혀 있으면서도, 0번과 1번, 2번과 3번이 각각 동기화되고 2번과 3번이 한 프레임 늦다는 설명이 함께 있습니다 [P7]. 파이5 지원 여부도 확인 필요입니다. 그래서 3단계에서 동기 오차를 직접 재는 것을 완료 조건에 넣었습니다. 카메라당 1152x648은 NPU 입력(640x640 이하)보다 크므로 해상도 자체는 충분합니다.
+쿼드 키트에는 주의할 점이 있습니다. 4대를 켜면 카메라당 해상도가 1152x648로 줄고 프레임레이트가 절반이 됩니다. 또 제품 페이지에 4대 전체가 하드웨어 동기화된다고 적혀 있으면서도, 0번과 1번, 2번과 3번이 각각 동기화되고 2번과 3번이 한 프레임 늦다는 설명이 함께 있습니다 [P6]. 파이5 지원 여부도 확인 필요입니다. 그래서 3단계에서 동기 오차를 직접 재는 것을 완료 조건에 넣었습니다. 카메라당 1152x648은 NPU 입력(640x640 이하)보다 크므로 해상도 자체는 충분합니다.
 
 쿼드 키트가 파이5에서 동작하지 않으면 CSI 2대와 USB 카메라 2대를 섞는 구성으로 바꿉니다. 이 경우 USB 쪽은 하드웨어 동기화가 없으므로, 타임스탬프가 가장 가까운 프레임끼리 묶는 방식으로 처리합니다.
 
@@ -53,11 +51,11 @@ DX-M1은 모듈 종류에 따라 크기와 메모리가 다릅니다. Radxa DX-M
 |---|---|---|
 | Raspberry Pi 5 8GB | 1 | |
 | 27W USB-C 공식 전원, 액티브 쿨러 | 각 1 | |
-| 듀얼 M.2 HAT (PCIe 스위치 내장) | 1 | Seeed ASM2806 보드 [P1] |
-| Hailo-8 M.2 모듈 | 1 | AI HAT+(26 TOPS)만 있으면 듀얼 구성 불가. 보유 형태 확인 필요 |
-| DEEPX DX-M1 또는 DX-M1M M.2 모듈 | 1 | 길이와 메모리 사양 확인 필요 |
+| Seeed PCIe 3.0 to Dual M.2 HAT (103110065) | 1 | 보유, ASM2806 스위치 [P1] |
+| Hailo-8 M.2 모듈 | 1 | 보유 |
+| DEEPX DX-M1 M.2 모듈 (4GB) | 1 | 보유 |
 | Camera Module 3 Wide | 2 | 0~2단계 |
-| Arducam IMX708 쿼드 카메라 키트 | 1 | 3단계, 199.99달러 [P7] |
+| Arducam IMX708 쿼드 카메라 키트 | 1 | 3단계, 199.99달러 [P6] |
 | SD 카드 또는 USB SSD | 1 | M.2 슬롯은 NPU 전용 |
 | 보정용 체커보드, 바닥 마커(마스킹 테이프), 줄자 | | [1단계 데모](phase1_demo.md)의 보정 절차용 |
 
@@ -67,7 +65,7 @@ DX-M1은 모듈 종류에 따라 크기와 메모리가 다릅니다. Radxa DX-M
 
 두 NPU 모두 CNN은 잘 돌리지만 BEV 변환에 필요한 grid_sample, scatter 같은 연산은 사실상 지원하지 않습니다(모델 선정 문서 3장). 따라서 NPU에는 CNN만 올리고, 기하 변환은 CPU에서 합니다. 그 위에서 두 NPU의 성격에 맞춰 일을 나눕니다.
 
-Hailo-8은 라즈베리파이용 모델 주와 데모 코드가 이미 맞춰져 있고 온보드 메모리가 없으므로, 매 프레임 돌아야 하는 작은 검출 모델을 맡깁니다. DX-M1은 온보드 메모리가 있어 가중치가 큰 모델이나 여러 모델을 함께 올리기에 유리하므로, 세그멘테이션과 깊이 추정처럼 무겁지만 몇 프레임에 한 번 돌려도 되는 모델을 맡깁니다. 이렇게 나누면 두 NPU가 같은 프레임을 동시에 처리하고, CPU는 두 결과를 합치기만 하면 됩니다.
+Hailo-8은 라즈베리파이용 모델 주와 데모 코드가 이미 맞춰져 있고 온보드 메모리가 없으므로, 매 프레임 돌아야 하는 작은 검출 모델을 맡깁니다. DX-M1은 4GB 온보드 메모리가 있어 가중치가 큰 모델이나 여러 모델을 함께 올리기에 유리하므로, 세그멘테이션과 깊이 추정처럼 무겁지만 몇 프레임에 한 번 돌려도 되는 모델을 맡깁니다. 이렇게 나누면 두 NPU가 같은 프레임을 동시에 처리하고, CPU는 두 결과를 합치기만 하면 됩니다.
 
 ### 3.2 단계별 배치표
 
@@ -78,7 +76,7 @@ Hailo-8은 라즈베리파이용 모델 주와 데모 코드가 이미 맞춰져
 | 3단계 | 위와 같음, 카메라 4대 | 위와 같음, 카메라 4대 | 쿼드 프레임 분할, 4대 IPM |
 | 4단계 | FlashOcc 뒷부분(BEV 인코더와 occupancy 헤드) | FlashOcc 앞부분(이미지 백본과 깊이 헤드) | BEVPool, channel-to-height reshape, occupancy 렌더링 |
 
-DX-M1용 모델은 Ultralytics에서 바로 만들 수 있습니다. `model.export(format="deepx")`로 .dxnn 파일이 나오고, 검출, 세그멘테이션, 시맨틱 세그멘테이션, 깊이 추정을 지원합니다. 시맨틱 세그멘테이션과 깊이는 YOLO26에서만 됩니다. 내보내기는 x86-64 리눅스에서만 되고 파이5에서는 실행만 합니다. INT8만 지원하며 보정 이미지는 실제 장착 카메라 영상과 비슷한 것을 넣어야 합니다 [P8]. 같은 문서에 파이5와 DX-M1에서 YOLO26n 검출 34.6ms, YOLO26n-seg 53.8ms(전후처리 제외)로 나와 있습니다 [P8].
+DX-M1용 모델은 Ultralytics에서 바로 만들 수 있습니다. `model.export(format="deepx")`로 .dxnn 파일이 나오고, 검출, 세그멘테이션, 시맨틱 세그멘테이션, 깊이 추정을 지원합니다. 시맨틱 세그멘테이션과 깊이는 YOLO26에서만 됩니다. 내보내기는 x86-64 리눅스에서만 되고 파이5에서는 실행만 합니다. INT8만 지원하며 보정 이미지는 실제 장착 카메라 영상과 비슷한 것을 넣어야 합니다 [P7]. 같은 문서에 파이5와 DX-M1에서 YOLO26n 검출 34.6ms, YOLO26n-seg 53.8ms(전후처리 제외)로 나와 있습니다 [P7].
 
 4단계에서 앞부분을 DX-M1에 두는 이유는 카메라 수만큼 반복되는 이미지 백본이 가장 무겁고 가중치도 크기 때문입니다. 뒷부분은 BEV 격자 하나에 대한 2D conv라 가벼워서 Hailo-8에 둡니다. 이렇게 하면 프레임 t의 백본을 DX-M1이 처리하는 동안 프레임 t-1의 BEV 인코더를 Hailo-8이 처리하는 파이프라인이 됩니다. 다만 Hailo-8은 HEF 두 개(검출, BEV 인코더)를 번갈아 돌리면 컨텍스트 전환 비용이 생기므로, 4단계에서 뒷부분도 DX-M1에 두는 배치와 비교해 빠른 쪽을 고릅니다.
 
@@ -97,7 +95,7 @@ DX-M1용 모델은 Ultralytics에서 바로 만들 수 있습니다. `model.expo
 
 ### 4.1 0단계: 장비 연결과 개별 동작 확인 (약 1주)
 
-듀얼 M.2 HAT에 두 NPU를 꽂고 PCIe Gen3를 켭니다(`dtparam=pciex1_gen=3`). Hailo는 `hailortcli fw-control identify`, DX-M1은 `dxcli -s`로 확인합니다 [P8]. DX-M1 런타임은 DX-RT 패키지(`dxrt-driver-dkms`, `libdxrt-bin`)를 설치하고 Python에서는 `dx_engine`의 `InferenceEngine`을 씁니다 [P8][P9]. DEEPX 설치 문서는 지원 OS로 Ubuntu와 Debian 12/13을 들고 Raspberry Pi OS를 따로 적지 않았으므로 [P9], 파이 OS에서 드라이버가 빌드되는지가 첫 관문입니다. 두 NPU에서 드론 검출 모델을 돌려 본 환경이 있으니 그 설치 상태를 그대로 출발점으로 씁니다.
+듀얼 M.2 HAT에 두 NPU를 꽂고 PCIe Gen3를 켭니다(`dtparam=pciex1_gen=3`). Hailo는 `hailortcli fw-control identify`, DX-M1은 `dxcli -s`로 확인합니다 [P7]. DX-M1 런타임은 DX-RT 패키지(`dxrt-driver-dkms`, `libdxrt-bin`)를 설치하고 Python에서는 `dx_engine`의 `InferenceEngine`을 씁니다 [P7][P8]. DEEPX 설치 문서는 지원 OS로 Ubuntu와 Debian 12/13을 들고 Raspberry Pi OS를 따로 적지 않았으므로 [P8], 파이 OS에서 드라이버가 빌드되는지가 첫 관문입니다. 두 NPU에서 드론 검출 모델을 돌려 본 환경이 있으니 그 설치 상태를 그대로 출발점으로 씁니다.
 
 완료 기준은 다음과 같습니다. 두 NPU가 한 부팅에서 함께 `lspci`에 보이고 각자 확인 명령에 응답합니다. 각 NPU에서 YOLOv8s를 단독으로 돌린 FPS를 기록합니다. 두 NPU를 동시에 30분 돌리는 동안 `vcgencmd get_throttled`가 0x0을 유지하고 PCIe 오류 로그(`dmesg`)가 없습니다.
 
@@ -145,7 +143,7 @@ nuScenes와 카메라 높이, 화각이 다르면 성능이 크게 떨어지므�
 
 | 위험 | 영향 | 대응 |
 |---|---|---|
-| 듀얼 M.2 HAT에서 한 NPU가 인식되지 않음 | 두 NPU 동시 사용 불가 | 보조 전원 연결, 다른 스위치 보드 시도, 안 되면 파이 두 대 구성 |
+| 듀얼 M.2 HAT에서 한 NPU가 인식되지 않음 | 두 NPU 동시 사용 불가 | 보조 전원 연결, PCIe Gen2로 낮춰 시험, 안 되면 파이 두 대에 NPU를 하나씩 달고 결과만 이더넷으로 주고받기 |
 | DX-RT 드라이버가 Raspberry Pi OS에서 빌드되지 않음 | DX-M1 사용 불가 | Ubuntu for Raspberry Pi 설치, Radxa 문서 절차 따르기 |
 | 쿼드 키트가 파이5에서 동작하지 않음 | 4대 구성 지연 | CSI 2대 + USB 2대, 타임스탬프 기반 묶음 |
 | 파이5 CPU가 BEV 합성과 렌더링을 못 따라감 | FPS 목표 미달 | BEV 해상도 낮추기, 렌더링 스레드 분리, 핵심 루프 C 확장 |
@@ -154,7 +152,7 @@ nuScenes와 카메라 높이, 화각이 다르면 성능이 크게 떨어지므�
 
 ## 6. 시작 전에 정해야 할 것
 
-가지고 계신 Hailo-8이 AI HAT+ 형태인지 M.2 모듈 형태인지에 따라 2.1절 구성이 달라집니다. AI HAT+라면 M.2 모듈을 새로 구하거나, 2단계부터 파이 두 대 구성으로 가야 합니다. DX-M1 모듈의 모델명(DX-M1 또는 DX-M1M)과 메모리 용량, 카메라를 실제 차량에 달지 아니면 소형 이동체나 책상 위 모형으로 먼저 시험할지도 정해야 합니다. 모형으로 시험할 경우 설정 파일의 카메라 높이와 BEV 범위를 줄이면 됩니다.
+카메라를 실제 차량에 달지, 아니면 소형 이동체나 책상 위 모형으로 먼저 시험할지 정해야 합니다. 모형으로 시험할 경우 설정 파일의 카메라 높이와 BEV 범위를 줄이면 됩니다.
 
 ## 참고 자료
 
@@ -164,8 +162,7 @@ nuScenes와 카메라 높이, 화각이 다르면 성능이 크게 떨어지므�
 | P2 | Seeed Studio Wiki, "Raspberry Pi 5 uses PCIe HAT / dual HAT": https://wiki.seeedstudio.com/raspberry_pi_5_uses_pcie_hat_dual_hat/ |
 | P3 | Hailo Community, "Raspberry Pi PCIe to 4ch PCIe": https://community.hailo.ai/t/raspberry-pi-pcie-to-4ch-pcie/19020/3 |
 | P4 | Hailo Community, "Hailo M.2 not detected alongside M.2 SSD on Raspberry Pi5": https://community.hailo.ai/t/hailo-m-2-not-detected-alongside-m-2-ssd-on-raspberry-pi5/17759 |
-| P5 | Radxa Docs, "DX-M1 on Raspberry Pi 5": https://docs.radxa.com/en/aicore/dx-m1/raspberry-pi5 |
-| P6 | Raspberry Pi, Camera Module 3 제품 페이지와 제품 설명서: https://www.raspberrypi.com/products/camera-module-3/ , https://datasheets.raspberrypi.com/camera/camera-module-3-product-brief.pdf |
-| P7 | Arducam, "12MP IMX708 Quad-Camera Kit": https://www.arducam.com/arducam-12mp-imx708-quad-camera-kit-wide-angle-stereo-synchronized-camera-module-for-raspberry-pi.html |
-| P8 | Ultralytics Docs, "DEEPX integration": https://docs.ultralytics.com/integrations/deepx |
-| P9 | DEEPX Developer, "DX-RT Installation on Linux": https://developer.deepx.ai/tech-docs/DXNN-SDK/DX-RT/Installation_on_Linux , https://pypi.org/project/dx-engine/ |
+| P5 | Raspberry Pi, Camera Module 3 제품 페이지와 제품 설명서: https://www.raspberrypi.com/products/camera-module-3/ , https://datasheets.raspberrypi.com/camera/camera-module-3-product-brief.pdf |
+| P6 | Arducam, "12MP IMX708 Quad-Camera Kit": https://www.arducam.com/arducam-12mp-imx708-quad-camera-kit-wide-angle-stereo-synchronized-camera-module-for-raspberry-pi.html |
+| P7 | Ultralytics Docs, "DEEPX integration": https://docs.ultralytics.com/integrations/deepx |
+| P8 | DEEPX Developer, "DX-RT Installation on Linux": https://developer.deepx.ai/tech-docs/DXNN-SDK/DX-RT/Installation_on_Linux , https://pypi.org/project/dx-engine/ |
