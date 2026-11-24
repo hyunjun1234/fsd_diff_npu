@@ -4,14 +4,22 @@
 
 ## 1. 어디에 쓰는가
 
+이 크레딧은 API(Batch API 포함), Agent SDK, Playground, 관리형 에이전트(Managed Agents)에만 쓸 수 있습니다(크레딧 안내 기준). Claude Code 사용은 대상이 아니므로 계획에 넣지 않았습니다.
+
 크레딧은 사람이 손으로 하면 오래 걸리지만 NPU에서 돌릴 필요는 없는 일에 씁니다. 파이5 위에서 실시간으로 도는 경로(검출, 세그, BEV 합성, 렌더링)에는 넣지 않습니다. 오프라인으로 PC에서 돌리고 결과만 저장소의 데이터나 기록으로 남깁니다.
 
-| 용도 | 구현 계획에서 쓰이는 곳 | 하는 일 |
-|---|---|---|
-| 자체 영상 검수와 태깅 | 2단계 검출 비교, 3단계 INT8 보정 이미지 고르기, 5단계 의사 라벨 걸러내기 | 카메라 프레임과 NPU 검출 결과를 함께 보내 놓친 물체, 잘못 잡은 물체를 표시하고 장면 조건(밝기, 역광, 비, 경사로, 주차장 등)을 태그로 붙입니다. 사람은 표시된 프레임만 다시 봅니다. |
-| 결과 화면 비교 판정 | 3단계 "한 바퀴 도는 사람이 같은 ID로 추적되는지", 4단계 "occupancy와 지면 투영 결과를 나란히 놓고 확인" | 카메라 영상과 BEV 화면을 한 장으로 붙여 보내고, 두 결과가 크게 어긋나는 프레임을 골라 이유를 적게 합니다. |
-| 컴파일과 실행 로그 분석 | 4.5절 연산자 확인, 0단계 드라이버 설치, 4단계 ONNX 분할 | Hailo DFC, DX-COM 컴파일 로그나 `dmesg`를 넣고 지원되지 않은 연산자와 그 위치, 바꿀 수 있는 대체 연산을 정리하게 합니다. |
-| 자료 읽기 | 4단계 FlashOcc 경량화, DX-RT와 HailoRT 문서 | 논문과 SDK PDF를 넣고 필요한 부분(입력 크기, BEVPool 구현, 양자화 옵션)을 찾아 묻습니다. |
+| 용도 | 쓰는 방식 | 구현 계획에서 쓰이는 곳 | 하는 일 |
+|---|---|---|---|
+| 자체 영상 검수와 태깅 | Batch API | 2단계 검출 비교, 3단계 INT8 보정 이미지 고르기, 5단계 의사 라벨 걸러내기 | 카메라 프레임과 NPU 검출 결과를 함께 보내 놓친 물체, 잘못 잡은 물체를 표시하고 장면 조건(밝기, 역광, 비, 경사로, 주차장 등)을 태그로 붙입니다. 사람은 표시된 프레임만 다시 봅니다. |
+| 결과 화면 비교 판정 | Batch API | 3단계 "한 바퀴 도는 사람이 같은 ID로 추적되는지", 4단계 "occupancy와 지면 투영 결과를 나란히 놓고 확인" | 카메라 영상과 BEV 화면을 한 장으로 붙여 보내고, 두 결과가 크게 어긋나는 프레임을 골라 이유를 적게 합니다. |
+| 컴파일과 실행 로그 분석 | API | 0단계 드라이버 설치, 2단계 이후 실행 오류 | Hailo DFC, DX-COM 컴파일 로그나 `dmesg`를 넣고 지원되지 않은 연산자와 그 위치, 바꿀 수 있는 대체 연산을 정리하게 합니다. |
+| 자료 읽기 | API | 4단계 FlashOcc 경량화, DX-RT와 HailoRT 문서 | 논문과 SDK PDF를 넣고 필요한 부분(입력 크기, BEVPool 구현, 양자화 옵션)을 찾아 묻습니다. |
+| 연산자 확인 자동 반복 | Agent SDK (PC에서 실행) | 4.5절 연산자 확인 | 에이전트가 최소 ONNX 모델을 만들고, PC에 설치된 Hailo DFC와 DX-COM으로 컴파일하고, 로그를 읽고, 실패한 연산을 바꿔 다시 컴파일하는 일을 반복한 뒤 모델 선정 문서 3장 표에 들어갈 결과를 정리합니다. |
+| ONNX 분할과 BEVPool 시험 | 관리형 에이전트 | 4단계 FlashOcc 분할 실행 | Anthropic이 운영하는 샌드박스에 FlashOcc 코드를 받아 CPU만으로 ResNet18 구성의 ONNX를 앞뒤로 나눠 내보내고, BEVPool NumPy 구현이 원래 결과와 같은지 무작위 입력으로 확인합니다. 학습은 하지 않습니다. |
+| NPU 소프트웨어 변경 확인 | 관리형 에이전트 (주기 실행) | 문서의 "확인 필요" 항목 | 주 1회 Hailo, DEEPX, Ultralytics의 릴리스 노트를 웹 검색으로 읽고, 연산자 지원이나 Raspberry Pi OS 지원이 바뀌었으면 요약을 남깁니다. |
+| 프롬프트 다듬기 | Playground | 위 Batch 작업 전체 | 프레임 몇 장으로 프롬프트와 모델, effort를 고른 뒤 코드로 옮깁니다. |
+
+연산자 확인을 Agent SDK로 PC에서 돌리는 이유는 Hailo DFC와 DX-COM이 PC에 설치된 컴파일러여서 에이전트가 그 자리에서 직접 실행해야 하기 때문입니다. 관리형 에이전트는 Anthropic 쪽 샌드박스에서 돌기 때문에 이 컴파일러가 필요 없는 일만 맡깁니다.
 
 픽셀 단위 마스크나 정밀한 3D 박스를 Claude가 직접 만들게 하는 일은 넣지 않았습니다. 도로 마스크 IoU를 잴 20프레임은 지금 계획대로 사람이 칠하고, Claude는 그 앞뒤의 고르기와 검수만 맡깁니다.
 
@@ -51,17 +59,19 @@ Haiku 5.5 가격은 프롬프트가 10만 토큰 이하일 때 값이고, 넘으
 
 | 항목 | 금액 | 모델 | 대략 할 수 있는 양 |
 |---|---|---|---|
-| 자체 영상 검수와 태깅 | 50달러 | Haiku 5.5 전체, Sonnet 5.5 일부 (Batch) | Haiku로 5만 장(약 9달러)과 Sonnet 재확인 1만 장(약 36달러) |
-| 결과 화면 비교 판정 | 30달러 | Sonnet 5.5 (Batch) | 합친 이미지 약 5천 장(합친 이미지는 토큰이 더 들어 장당 비용을 1.5배로 잡음) |
-| 컴파일과 실행 로그 분석 | 30달러 | Opus 5.5 | 0.30달러짜리 분석 약 100번 |
-| 자료 읽기 | 15달러 | Opus 5.5 (캐시 사용) | 논문과 SDK 문서 여러 편에 질문 수십 번 |
-| 프롬프트 시험 | 15달러 | 세 모델 | 각 용도별로 100장 정도 돌려 보고 모델과 effort 정하기 |
-| 예비 | 60달러 | | 5단계 데이터가 늘어날 때, 또는 아래 Claude Code 용도 |
+| 자체 영상 검수와 태깅 (Batch API) | 45달러 | Haiku 5.5 전체, Sonnet 5.5 일부 | Haiku로 5만 장(약 9달러)과 Sonnet 재확인 1만 장(약 36달러) |
+| 결과 화면 비교 판정 (Batch API) | 25달러 | Sonnet 5.5 | 합친 이미지 약 4,600장(합친 이미지는 토큰이 더 들어 장당 비용을 1.5배로 잡음) |
+| 로그 분석과 자료 읽기 (API) | 25달러 | Opus 5.5 | 0.30달러짜리 분석과 질문 합쳐 약 80번 |
+| 연산자 확인 자동 반복 (Agent SDK) | 40달러 | Sonnet 5.5 | 한 번 실행에 상한 5달러를 걸고 약 8번 |
+| ONNX 분할과 BEVPool 시험 (관리형 에이전트) | 20달러 | Sonnet 5.5 | 세션당 상한 5달러로 약 4번 |
+| NPU 소프트웨어 변경 확인 (관리형 에이전트) | 10달러 | Haiku 5.5 | 주 1회, 검색 10번 안팎이면 한 번에 0.1~0.2달러 수준(추정) |
+| 프롬프트 다듬기 (Playground) | 10달러 | 세 모델 | 용도별로 프레임 수십 장 시험 |
+| 예비 | 25달러 | | 5단계 데이터가 늘어날 때 |
 | 합계 | 200달러 | | |
 
-순서는 구현 단계에 맞춥니다. 0단계와 4.5절에서는 로그 분석과 자료 읽기를 먼저 쓰고, 2단계부터 영상 검수, 3단계와 4단계에서 화면 비교 판정을 씁니다.
+순서는 구현 단계에 맞춥니다. 0단계에서는 로그 분석과 자료 읽기, 0~3단계와 함께 진행하는 4.5절에서는 Agent SDK 연산자 확인을 먼저 씁니다. 2단계부터 영상 검수, 3단계와 4단계에서 화면 비교 판정과 관리형 에이전트 ONNX 분할 시험을 씁니다.
 
-Claude Code를 Console 계정으로 로그인해 쓰면 그 사용량도 이 크레딧에서 나갑니다 [C4]. 공식 문서에 기업 사용자 평균이 활동한 날 하루 약 13달러로 나와 있어 [C5], 200달러를 코드 작업에 쓰면 보름 정도면 다 씁니다. 이미 claude.ai 요금제로 Claude Code를 쓰고 있다면 코드 작업은 그쪽에서 하고, 크레딧은 위처럼 API로만 할 수 있는 일에 남겨 두는 편이 낫습니다. 요금제가 없을 때만 예비 금액을 코드 작업에 씁니다.
+에이전트 방식은 한 번 실행에 모델을 여러 번 부르기 때문에 단순 API 호출보다 비용이 빨리 늘어납니다. Claude Code 공식 문서에 기업 사용자 평균이 활동한 날 하루 약 13달러로 나와 있는데 [C5], Agent SDK는 Claude Code와 같은 에이전트 구조를 라이브러리로 쓰는 것이어서 [C8] 비슷한 규모로 쓰일 수 있습니다. 그래서 Agent SDK에는 실행마다 `max_budget_usd`를, 관리형 에이전트에는 세션 지출 상한(budget)을 반드시 겁니다. Agent SDK의 비용 상한은 프로그램이 계산한 추정치로 멈추는 방식이라 조금 넘을 수 있으므로 여유를 두고 잡습니다 [C9]. 관리형 에이전트는 토큰 비용에 더해 세션이 실제로 일하는 시간 1시간당 0.08달러가 붙고, 웹 검색은 1,000번에 10달러입니다 [C1]. 관리형 에이전트는 아직 베타입니다 [C10].
 
 ## 4. Console에서 시작하기
 
@@ -69,7 +79,7 @@ Claude Code를 Console 계정으로 로그인해 쓰면 그 사용량도 이 크
 
 먼저 [Billing](https://platform.claude.com/settings/billing) 페이지에서 200달러 크레딧이 조직에 들어와 있는지 확인합니다 [C1]. 크레딧 만료일이 있는지는 공개 문서에서 찾지 못했습니다(확인 필요). Billing 페이지나 크레딧을 받은 안내 메일에서 확인해 두고, 만료일이 있으면 예산안의 순서를 앞당깁니다.
 
-다음으로 이 프로젝트 전용 워크스페이스를 만듭니다. [Workspaces](https://platform.claude.com/settings/workspaces) 페이지에서 Create workspace를 누르면 되고, 조직 관리자만 만들 수 있습니다 [C4]. 기본 워크스페이스(Default Workspace)는 Console 플레이그라운드나 Claude Code 사용량이 지출 한도에 잡히지 않을 수 있어 [C4], 따로 만든 워크스페이스에 키를 두는 것이 한도 관리에 확실합니다.
+다음으로 이 프로젝트 전용 워크스페이스를 만듭니다. [Workspaces](https://platform.claude.com/settings/workspaces) 페이지에서 Create workspace를 누르면 되고, 조직 관리자만 만들 수 있습니다 [C4]. 기본 워크스페이스(Default Workspace)에 건 지출 한도에는 Playground와 관리형 에이전트 세션 사용량이 잡히지 않을 수 있습니다 [C4]. 이 사용량도 조직 전체 한도에는 잡히므로, 조직 한도를 반드시 걸고 API 키와 관리형 에이전트는 따로 만든 워크스페이스에 둡니다.
 
 ### 4.2 지출 한도와 알림
 
@@ -181,6 +191,56 @@ print(batch.id)
 
 처음에는 100장으로 시험해서 사람이 직접 본 결과와 얼마나 맞는지, 장당 실제 비용이 얼마인지 잽니다. Haiku의 판정이 사람과 많이 다르면 1차 검수 모델을 Sonnet으로 올리고 예산표의 장수를 그에 맞춰 줄입니다.
 
+### 5.3 연산자 확인 에이전트 (Agent SDK)
+
+Agent SDK는 Hailo DFC와 DX-COM이 설치된 x86-64 리눅스 PC에서 돌립니다. 인증은 같은 `ANTHROPIC_API_KEY`를 씁니다 [C8].
+
+```bash
+python -m venv .venv-agent && . .venv-agent/bin/activate
+pip install claude-agent-sdk
+```
+
+```python
+import asyncio
+from claude_agent_sdk import query, ClaudeAgentOptions, ResultMessage
+
+TASK = (
+    "docs/edge_npu_model_selection.md 3장의 시험을 합니다. out/opcheck/ 아래에 "
+    "grid_sample만 있는 모델, ScatterND만 있는 모델, ResNet18+FPN 백본을 ONNX로 만들고 "
+    "hailo parser와 DX-COM으로 각각 컴파일하세요. 실패하면 로그에서 원인 연산을 찾아 "
+    "대체 연산으로 바꾼 버전도 시험하고, 결과를 out/opcheck/result.md 표로 정리하세요. "
+    "저장소의 기존 파일은 고치지 마세요."
+)
+
+async def main():
+    options = ClaudeAgentOptions(
+        model="claude-sonnet-5-5",
+        cwd="/home/사용자/fsd_diff_npu",
+        allowed_tools=["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
+        permission_mode="acceptEdits",
+        max_turns=60,
+        max_budget_usd=5.0,
+    )
+    async for msg in query(prompt=TASK, options=options):
+        if isinstance(msg, ResultMessage):
+            print(msg.result)
+            print("추정 비용(USD):", msg.total_cost_usd)
+
+asyncio.run(main())
+```
+
+`allowed_tools`에 `Bash`가 들어가 에이전트가 PC에서 명령을 직접 실행합니다. 처음에는 별도 사용자 계정이나 컨테이너에서 돌리고, `out/` 아래 결과만 확인한 뒤 필요한 것만 저장소로 옮깁니다. `total_cost_usd`는 추정치이므로 실제 금액은 Console의 Cost 페이지에서 확인합니다 [C9].
+
+### 5.4 관리형 에이전트
+
+관리형 에이전트는 Console에서 에이전트(모델, 시스템 프롬프트, 도구)를 한 번 만들고, 일을 시킬 때마다 세션을 엽니다. 세션마다 Anthropic이 운영하는 컨테이너가 붙어 그 안에서 명령과 파일 작업을 합니다 [C10]. 이 프로젝트에서는 두 가지로 씁니다.
+
+ONNX 분할 시험 에이전트는 네트워크를 패키지 저장소와 GitHub 정도로 제한한 환경에서 돌리고, 세션을 만들 때 지출 상한 5달러를 겁니다. 결과물(분할한 ONNX 구조 요약, BEVPool 비교 결과)은 세션이 끝나기 전에 파일로 받아 둡니다.
+
+NPU 소프트웨어 변경 확인 에이전트는 웹 검색 도구만 켜고, 검색 대상 도메인을 Hailo, DEEPX, Ultralytics 사이트와 GitHub로 제한한 뒤 주 1회 실행합니다. 실행할 때마다 검색 횟수만큼 비용이 붙으므로 시스템 프롬프트에 검색 횟수 상한을 적어 둡니다.
+
+세션 진행 상황은 Console의 워크스페이스 화면에서 세션별로 볼 수 있습니다 [C10].
+
 ## 참고 자료
 
 | 번호 | 출처 |
@@ -192,3 +252,6 @@ print(batch.id)
 | C5 | Anthropic, Claude Code costs. https://code.claude.com/docs/en/costs |
 | C6 | Anthropic, Rate limits (Spend limits 포함). https://platform.claude.com/docs/en/api/rate-limits |
 | C7 | Anthropic, Get started with Claude. https://platform.claude.com/docs/en/get-started |
+| C8 | Anthropic, Agent SDK overview. https://code.claude.com/docs/en/agent-sdk/overview |
+| C9 | Anthropic, Agent SDK cost tracking. https://code.claude.com/docs/en/agent-sdk/cost-tracking |
+| C10 | Anthropic, Claude Managed Agents overview. https://platform.claude.com/docs/en/managed-agents/overview |
