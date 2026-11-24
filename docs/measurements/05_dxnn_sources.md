@@ -53,3 +53,27 @@ sha256sum *.dxnn
 ```
 
 나온 sha256이 3장 표와 같은지 확인합니다. DX-RT를 3.5.0 이상으로 올리면 2_5_0 폴더의 v9 모델로 바꿀 수 있지만, 출력 형식이 같은지는 확인 필요입니다.
+
+## 6. 깊이 모델 추가 (2026-11-24 밤)
+
+2단계 끝의 단안 깊이 확인을 위해 같은 2_4_0 목록(dx_app v3.2.2 태그의 modelzoo_manifest.json, 분류 "Depth Estimation")에서 다섯 파일을 더 받았습니다. 주소는 모두 `https://sdk.deepx.ai/modelzoo/dxnn/2_4_0/` 뒤에 파일 이름을 붙인 것이고, 파이의 models/dxnn/ 에 있습니다. 크기는 바이트입니다.
+
+| 파일 | 크기 | sha256 |
+|---|---|---|
+| yolo26-depth-n_768x768.dxnn | 12348293 | 4edfd85001c71ac1ebc7b244a03c1692974f9c20061d7e053077372d0fe556cf |
+| yolo26-depth-s_768x768.dxnn | 26565935 | 736b94b47963d3e1fb0b5f9d7cae71decef9257215e7bb5bad1a3e90deb91319 |
+| scdepthv3_256x320.dxnn | 29775266 | 02e79c5f89a82f5988a8e99d45d2cfc079adeb9cf2a50e318b8e92e3e1b85d39 |
+| fastdepth_224x224.dxnn | 3613278 | 4f4c1ad6e26825664b5ca44152c5f8830442bcd5037a19750197982a7f46abc2 |
+| depthanythingv2-vits_224x224.dxnn | 53486601 | 1fd16161789488c24201b2b478d57db2ec19d269a3c24a4fa7081aff7c877198 |
+
+목록에 적힌 이름은 차례대로 yolo26-depth-n_768x768, yolo26-depth-s_768x768, scdepthv3, FastDepth_1, depth_anything_v2_vits-1입니다. 목록에는 yolo26-depth m, l, x와 depthanythingv2 vitb, vitl도 있지만 크기와 속도를 보고 받지 않았습니다. 다섯 파일 모두 파이의 dx_engine 3.4.2에서 열렸습니다. depthanythingv2-vits는 입력이 [1,3,224,224] float32라 정규화 값이 모델 밖에 있어 쓰지 않았습니다(09_npu_models.md 1장).
+
+다시 받는 명령(파이 저장소 폴더, 결과는 models/dxnn/):
+
+```bash
+cd models/dxnn
+for f in yolo26-depth-n_768x768 yolo26-depth-s_768x768 scdepthv3_256x320 fastdepth_224x224 depthanythingv2-vits_224x224; do
+  curl -sS -f -o $f.dxnn https://sdk.deepx.ai/modelzoo/dxnn/2_4_0/$f.dxnn
+done
+sha256sum yolo26-depth-*.dxnn scdepthv3_256x320.dxnn fastdepth_224x224.dxnn depthanythingv2-vits_224x224.dxnn
+```

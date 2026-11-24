@@ -49,13 +49,16 @@ cd ~/Desktop/App/fsd_diff_npu && python ~/Desktop/App/fsd_agent.py --task-file d
 | 두 NPU YOLOv8s 박스 일치 (IoU 평균) | 0.973 |
 | 센서에서 화면까지 지연, Hailo 단독 (평균 / p95) | 81 / 97ms |
 | 같은 지연, Hailo + DX-M1 세그 | 94 / 114ms |
+| DX-M1 깊이 yolo26-depth-n (장당 NPU) | 25.4ms |
 
 1단계 기본 설정에서 병목은 NPU(약 18ms)가 아니라 CPU의 BEV 합성(23ms)과 렌더링(28ms)이었습니다. 도로 마스크 덧칠을 OpenCV로 바꿔 카메라 2대 기준 39.5ms에서 5.8ms로 줄였습니다. BEVPool은 입력 256x704, D=88, C=64, BEV 100x100 조건이고 NumPy로는 약 110ms라 C 구현(ctypes, OpenMP)을 씁니다. 21.4 FPS는 세그 자리에 드론 모델을 넣어 잰 값이고, 실제 BiSeNetV2 세그로는 19.6 FPS입니다. 세그는 한 번(카메라 2장)에 151ms가 걸려 3프레임마다 돌립니다. 검출 비교는 방 안 녹화 100프레임에서 COCO 80 클래스, 점수 0.25로 했습니다(사람과 차가 없어서).
 
 ## 다음에 할 일
 
-1. 사용자가 모형 보정을 마치면, 보정값을 넣고 거리 오차와 도로 IoU(직접 칠한 20프레임)를 잽니다.
-2. 3단계(카메라 4대)와 연산자 확인, FlashOcc 재학습은 쿼드 카메라와 x86 GPU 서버가 준비된 뒤에 합니다.
+1. 3D 시점 렌더러([agent_tasks/10_reality_view_3d.txt](agent_tasks/10_reality_view_3d.txt)): 테슬라 리얼리티 뷰처럼 차 뒤쪽 위에서 내려다보는 화면을 만듭니다.
+2. DX-M1 방열팬을 단 뒤 깊이 모델(yolo26-depth-n 추천, 대안 fastdepth)을 별도 스레드로 파이프라인에 붙입니다. 모델 비교는 [09 측정 문서](measurements/09_npu_models.md)에 있습니다.
+3. 사용자가 모형 보정을 마치면, 보정값을 넣고 거리 오차와 도로 IoU(직접 칠한 20프레임)를 잽니다.
+4. 3단계(카메라 4대)와 연산자 확인, FlashOcc 재학습은 쿼드 카메라와 x86 GPU 서버가 준비된 뒤에 합니다.
 
 ## 사용자가 해야 할 일
 
@@ -64,7 +67,8 @@ cd ~/Desktop/App/fsd_diff_npu && python ~/Desktop/App/fsd_agent.py --task-file d
 3. 모형 축척 결정(기본 1/10, 모델 Y 길이 4.79m 기준)과 카메라 장착. 전방 카메라가 거의 수평이라 모형 앞쪽 틀은 낮게 두어야 합니다. 이어서 [모형 보정 문서](phase1_model_rig_calibration.md) 순서대로 체커보드 촬영, 외부 보정, 장난감 차 거리 오차 측정.
 4. 후방 Camera Module 3는 자동 초점이므로 보정과 시험 때 초점 고정 확인.
 5. 동시 실행 판정 기준 결정: 1단계 기록(14.2 FPS) 기준이면 통과, 같은 코드의 Hailo 단독(26.2 FPS) 기준이면 25% 낮습니다.
-6. Hailo DFC와 DX-COM 컴파일, FlashOcc 학습이 필요해지면 x86 리눅스 GPU 서버 연결.
+6. 진짜 반대 배치(세그 Hailo, 검출 DX-M1)를 재려면 Hailo 도로 세그 HEF(예: Hailo Model Zoo의 stdc1)를 받을지 결정. 지금 배치(검출 Hailo, 세그 DX-M1)가 대용 비교에서 더 빨랐습니다.
+7. Hailo DFC와 DX-COM 컴파일, FlashOcc 학습이 필요해지면 x86 리눅스 GPU 서버 연결.
 
 ## 알려진 문제
 
@@ -90,5 +94,6 @@ cd ~/Desktop/App/fsd_diff_npu && python ~/Desktop/App/fsd_agent.py --task-file d
 | 06 2단계 .dxnn과 모형 보정 | 11.86달러 |
 | 07 테슬라 배치 기준 설정 | 5.99달러 |
 | 08 연속 실행과 지연, 녹화 | 6.64달러 |
+| 09 깊이와 세그 모델 비교 | 6.64달러 |
 
-합계는 47.29달러에 끊긴 실행 한 번이 더해집니다. 실제 금액은 Console의 Cost 페이지가 기준입니다.
+합계는 53.93달러에 끊긴 실행 한 번이 더해집니다. 실제 금액은 Console의 Cost 페이지가 기준입니다.

@@ -34,6 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--model", help=".dxnn 경로. 없으면 장치 정보만 본다")
     ap.add_argument("--loops", type=int, default=50, help="시간 측정 반복 수(모델이 있을 때)")
     ap.add_argument("--out", help="결과 JSON 경로. 예: out/measure/02_dx_probe.json")
+    ap.add_argument("--resize", action="store_true", help="--image를 레터박스 대신 단순 리사이즈로 넣음(세그, 깊이 모델)")
     ap.add_argument("--image", help="무작위 값 대신 넣을 사진(레터박스해서 넣음). 출력 값 범위를 실제 장면으로 볼 때")
     return ap
 
@@ -101,8 +102,12 @@ def _describe(outs) -> list[dict]:
     return rep
 
 
-def _image_input(path: str, shape: list[int]) -> np.ndarray:
-    """실제 사진을 모델 입력 크기로(레터박스, RGB) 만든다. 출력 값 범위를 실제 장면으로 보려고 쓴다."""
+def _image_input(path: str, shape: list[int], resize: bool = False) -> np.ndarray:
+    """실제 사진을 모델 입력 크기로(RGB) 만든다. 출력 값 범위를 실제 장면으로 보려고 쓴다.
+
+    resize=False면 레터박스(검출 모델), True면 단순 리사이즈(세그, 깊이 모델. 회색 여백이 값 범위에 섞이지 않음).
+    입력이 NCHW([1,3,H,W])로 보고되는 모델(예: depthanythingv2)은 축을 바꿔 넣는다.
+    """
     import cv2
 
     from realityview.detectors import letterbox
@@ -110,12 +115,16 @@ def _image_input(path: str, shape: list[int]) -> np.ndarray:
     img = cv2.imread(path)
     if img is None:
         raise FileNotFoundError(path)
-    hw = (shape[1], shape[2])  # dx_engine 입력은 NHWC로 확인함
-    lb, _, _ = letterbox(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), hw)
-    return np.ascontiguousarray(lb.reshape(shape))
+    nchw = len(shape) == 4 and shape[1] in (1, 3) and shape[3] not in (1, 3)
+    hw = (shape[2], shape[3]) if nchw else (shape[1], shape[2])  # dx_engine 입력은 대개 NHWC
+    rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    x = cv2.resize(rgb, (hw[1], hw[0])) if resize else letterbox(rgb, hw)[0]
+    if nchw:
+        x = np.transpose(x, (2, 0, 1))
+    return np.ascontiguousarray(x.reshape(shape))
 
 
-def probe_model(path: str, loops: int, image: str | None = None) -> dict:
+def probe_model(path: str, loops: int, image: str | None = None, resize: bool = False) -> dict:
     from dx_engine import InferenceEngine
 
     rep: dict = {"model": path}
@@ -135,7 +144,7 @@ def probe_model(path: str, loops: int, image: str | None = None) -> dict:
         shape = [int(v) for v in ins[0]["shape"]]
         dtype = ins[0]["dtype"] or np.uint8
         if image:
-            x = _image_input(image, shape).astype(dtype)
+            x = _image_input(image, shape, resize).astype(dtype)
             rep["input_image"] = image
         else:
             x = np.random.randint(0, 255, size=shape).astype(dtype)
@@ -204,7 +213,7 @@ def main() -> int:
         if not os.path.isfile(args.model):
             print(f"모델 파일이 없습니다: {args.model}", file=sys.stderr)
             return 2
-        rep["model"] = probe_model(args.model, args.loops, args.image)
+        rep["model"] = probe_model(args.model, args.loops, args.image, args.resize)
     text = json.dumps(rep, ensure_ascii=False, indent=2, default=str)
     print(text)
     if args.out:

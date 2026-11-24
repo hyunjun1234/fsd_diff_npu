@@ -72,6 +72,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="none",
         help="시험용: --seg-npu 세그는 그대로 돌리고 마스크만 화소 50%%가 1인 무작위 마스크로 바꿈(렌더링 비용 측정). 기본 none",
     )
+    ap.add_argument(
+        "--det-hef",
+        default=None,
+        help="Hailo 검출 HEF를 설정(npu.det_hef) 대신 이것으로. NMS 내장 HEF만. 예: /usr/share/hailo-models/yolov6n_h8.hef",
+    )
     ap.add_argument("--video", action="append", default=[], help="name=path 형식으로 카메라 입력을 파일로 대체")
     ap.add_argument("--model", default="yolov8n.pt", help="ultralytics 백엔드 모델")
     ap.add_argument("--frames", type=int, default=0, help="0이면 무한")
@@ -242,7 +247,7 @@ def main() -> None:
             from realityview.detectors import HailoBackend
 
             backend = HailoBackend(
-                npu["det_hef"],
+                args.det_hef or npu["det_hef"],
                 npu.get("seg_hef"),
                 score_thr=float(npu.get("score_thr", 0.4)),
                 road_classes=npu.get("road_classes", [0]),

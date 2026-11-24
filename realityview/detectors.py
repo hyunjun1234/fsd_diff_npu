@@ -140,6 +140,24 @@ class _HefModel:
         self._pipe_ctx.__exit__(None, None, None)
 
 
+# 파이의 /usr/share/hailo-models 에 있는 Hailo-8용 HEF(2026-11-24 확인)와 이 백엔드에서 쓸 수 있는지.
+#   yolov8s_h8.hef    검출, NMS 내장(점수 0.2, IoU 0.7)              det_hef로 씀(기본)
+#   yolov6n_h8.hef    검출, NMS 내장(점수 0.2, IoU 0.65), 약 2배 빠름  det_hef로 쓸 수 있음(--det-hef)
+#   yolov5n_seg_h8.hef 인스턴스 세그(COCO, 출력 4개, CPU 후처리 필요)   도로 세그가 아니라 seg_hef로 못 씀
+#   yolov8s_pose_h8.hef 자세 추정                                        쓰지 않음
+# 도로 세그(예: Hailo Model Zoo의 stdc1)나 깊이(scdepthv3) HEF는 파이에 없다.
+def check_hailo_seg_outputs(output_names: Sequence[str], hef_path: str = "") -> None:
+    """seg_hef는 출력 1개(클래스 로짓이나 클래스 번호 맵)인 시맨틱 세그 HEF만 받는다.
+
+    yolov5n_seg처럼 출력이 여럿인 인스턴스 세그 HEF를 넣으면 첫 출력만 argmax해서 엉뚱한 마스크가 나오므로 막는다.
+    """
+    if len(output_names) != 1:
+        raise ValueError(
+            f"seg_hef는 출력이 1개인 시맨틱 세그 HEF여야 합니다: {hef_path} 출력 {len(output_names)}개 {list(output_names)}. "
+            "yolov5n_seg 같은 인스턴스 세그 HEF는 도로 마스크를 내지 않습니다."
+        )
+
+
 class HailoBackend:
     def __init__(
         self,
@@ -166,6 +184,8 @@ class HailoBackend:
         self.vdevice = VDevice(params)
         self.det = _HefModel(self.vdevice, det_hef)
         self.seg = _HefModel(self.vdevice, seg_hef) if seg_hef else None
+        if self.seg is not None:
+            check_hailo_seg_outputs(self.seg.output_names, seg_hef)
         self.score_thr = score_thr
         self.road_classes = tuple(road_classes)
         self.seg_every = max(1, seg_every)
@@ -425,6 +445,10 @@ def parse_dx_detections(
 #   - YOLOv8 PPU는 x, y가 상자 중심, w, h가 폭과 높이이고 모두 모델 입력(레터박스 영상) 픽셀이다.
 #     DEEPX dx_app v3.2.2의 YOLOv8PPUPostprocessor도 앵커나 stride 계산 없이 이 값을 그대로 쓴다.
 #   - NMS는 장치에서 하지 않으므로 CPU에서 한다(dx_app도 CPU NMS).
+#   - 장치 쪽 점수 문턱값은 0.001이다. 모델 안 compile_config의 ppu.conf_thres가 0.001이고, 실제 사진 두 장에서
+#     돌려받은 상자 135개, 344개의 최저 점수도 0.0010이었다(2026-11-24 파이). 그래서 장치가 거의 모든 후보를
+#     넘기고, 실제로 남는 상자는 설정의 score_thr(기본 0.4)가 정한다. score_thr를 0.001보다 낮춰도 효과가 없다.
+PPU_DEVICE_SCORE_THR = 0.001
 PPU_BBOX_DTYPE = np.dtype(
     [
         ("x", "<f4"), ("y", "<f4"), ("w", "<f4"), ("h", "<f4"),
@@ -628,14 +652,19 @@ class DXM1Backend:
         max_det: int = 100,
         seg_channels_first: bool = True,  # 세그 로짓이 (1,C,H,W)면 True. dx_engine 출력은 NCHW로 확인함
         engine_factory=None,  # 시험용 가짜 엔진. None이면 dx_engine
+        depth_model: str | None = None,  # 단안 깊이 .dxnn(선택). 있으면 estimate_depth()를 쓸 수 있다
     ):
-        if not det_model and not seg_model:
-            raise ValueError("DX-M1 백엔드에는 검출 모델이나 세그 모델 중 하나는 있어야 합니다. " + DX_MODEL_HELP.format(key="dx_det_model"))
+        if not det_model and not seg_model and not depth_model:
+            raise ValueError(
+                "DX-M1 백엔드에는 검출, 세그, 깊이 모델 중 하나는 있어야 합니다. " + DX_MODEL_HELP.format(key="dx_det_model")
+            )
         # 엔진을 하나라도 열기 전에 두 파일을 모두 확인한다(하나만 열고 실패하면 장치를 놓지 못할 수 있음)
         if det_model:
             _require_dx_model(det_model, "dx_det_model")
         if seg_model:
             _require_dx_model(seg_model, "dx_seg_model")
+        if depth_model:
+            _require_dx_model(depth_model, "dx_depth_model")
         self.timer = timer or StageTimer(enabled=False)
         self.labels = labels
         self.score_thr = score_thr
@@ -648,11 +677,14 @@ class DXM1Backend:
         self.seg_channels_first = seg_channels_first
         self.det: DxModel | None = None
         self.seg: DxModel | None = None
+        self.depth: DxModel | None = None
         try:
             if det_model:
                 self.det = DxModel(det_model, "dx_det_model", engine_factory)
             if seg_model:
                 self.seg = DxModel(seg_model, "dx_seg_model", engine_factory)
+            if depth_model:
+                self.depth = DxModel(depth_model, "dx_depth_model", engine_factory)
         except Exception:
             self.close()
             raise
@@ -675,6 +707,12 @@ class DXM1Backend:
         th, tw = self.seg.input_hw
         return [self.seg.prepare(cv2.resize(self._color(f), (tw, th))) for f in frames]
 
+    def _prepare_depth(self, frames: Sequence[np.ndarray]) -> list[np.ndarray]:
+        # DEEPX dx_app 깊이 예제와 같이 레터박스 없이 단순 리사이즈(SimpleResizePreprocessor).
+        # 그래서 출력 맵을 원본 크기로 늘리기만 하면 화소 위치가 맞는다.
+        th, tw = self.depth.input_hw
+        return [self.depth.prepare(cv2.resize(self._color(f), (tw, th))) for f in frames]
+
     # ---- 원시 출력 ------------------------------------------------------
     def infer_raw(self, frames: Sequence[np.ndarray], which: str = "det") -> list[list[np.ndarray]]:
         """후처리 전 출력. 카메라마다 출력 텐서 목록 하나씩.
@@ -691,7 +729,11 @@ class DXM1Backend:
             if self.seg is None:
                 raise RuntimeError("세그 모델(dx_seg_model)이 없습니다")
             return self.seg.run_many(self._prepare_seg(frames))
-        raise ValueError(f"which는 det 또는 seg여야 합니다: {which}")
+        if which == "depth":
+            if self.depth is None:
+                raise RuntimeError("깊이 모델(dx_depth_model)이 없습니다")
+            return self.depth.run_many(self._prepare_depth(frames))
+        raise ValueError(f"which는 det, seg, depth 중 하나여야 합니다: {which}")
 
     # ---- 세그: 도로 마스크 ----------------------------------------------
     def segment(self, frames: Sequence[np.ndarray]) -> list[np.ndarray]:
@@ -703,6 +745,27 @@ class DXM1Backend:
             dx_seg_to_road_mask(o[0], f.shape[:2], self.road_classes, self.seg_channels_first)
             for o, f in zip(outs, frames)
         ]
+
+    # ---- 깊이 -----------------------------------------------------------
+    def estimate_depth(self, frames: Sequence[np.ndarray], full_size: bool = True) -> list[np.ndarray]:
+        """카메라마다 깊이 맵(float32, 모델 값 그대로). full_size=True면 원본 영상 크기로 늘린다.
+
+        값의 뜻(깊이/역깊이, 미터 여부)은 realityview/depth.py 참고. 시간은 "depth" 단계로 잰다.
+        """
+        from .depth import depth_from_output, resize_depth
+
+        if self.depth is None:
+            raise RuntimeError("깊이 모델(dx_depth_model)이 없습니다")
+        tm = self.timer
+        with tm.stage("depth_pre"):
+            xs = self._prepare_depth(frames)
+        with tm.stage("depth"):
+            outs = self.depth.run_many(xs)
+        with tm.stage("depth_post"):
+            maps = [depth_from_output(o[0]) for o in outs]
+            if full_size:
+                maps = [resize_depth(m, f.shape[:2]) for m, f in zip(maps, frames)]
+        return maps
 
     # ---- 검출(+세그) -----------------------------------------------------
     def infer(self, frames: Sequence[np.ndarray]) -> list[FrameResult]:
@@ -750,10 +813,10 @@ class DXM1Backend:
         return results
 
     def close(self) -> None:
-        for m in (self.det, self.seg):
+        for m in (self.det, self.seg, self.depth):
             if m is not None:
                 m.close()
-        self.det = self.seg = None
+        self.det = self.seg = self.depth = None
 
 
 # ---------------------------------------------------------------------------
