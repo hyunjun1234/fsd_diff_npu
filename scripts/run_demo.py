@@ -13,7 +13,9 @@ import cv2
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from realityview.config import load_config  # noqa: E402
+from realityview.lanes import LaneConfig  # noqa: E402
 from realityview.pipeline import RealityViewPipeline  # noqa: E402
+from realityview.traffic_lights import TrafficLightConfig  # noqa: E402
 from realityview.profiling import (  # noqa: E402
     HealthLogger,
     LatencyRecorder,
@@ -65,6 +67,13 @@ from realityview.profiling import (  # noqa: E402
 #   # 카메라마다 시각이 다를 때(CSI + USB 섞음) 기준 카메라 시각에 가장 가까운 프레임끼리 묶기
 #   timeout -s INT -k 10 40 python scripts/run_demo.py --config configs/four_cam_mixed.yaml --backend hailo \
 #       --sync --sync-csv out/measure/sync.csv --headless --duration 20 --profile \
+#       --health-csv out/measure/health.csv --health-interval 10 --hailo-stop-temp 95
+#
+#   # 차선과 신호등 색을 3D 화면과 탑뷰에 더하기(기본 꺼짐). 합성 장면에 굽은 도로와 신호등을 넣어 확인
+#   python scripts/run_demo.py --backend sim --view both --lanes --traffic-lights --sim-curvature 0.006 --sim-lights \
+#       --frames 150 --save out/video/sim_lanes_lights.mp4 --headless
+#   timeout -s INT -k 10 40 python scripts/run_demo.py --config configs/two_cam_current.yaml --backend hailo \
+#       --view 3d --lanes --traffic-lights --headless --duration 20 --profile \
 #       --health-csv out/measure/health.csv --health-interval 10 --hailo-stop-temp 95
 #
 #   # PC에서 녹화 영상으로 개발 (ultralytics 필요)
@@ -198,6 +207,14 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--sync-tol-ms", type=float, default=25.0, help="묶음 허용 오차(ms). 기본 25")
     ap.add_argument("--sync-miss", choices=["hold", "blank"], default="hold", help="허용 오차를 넘으면 hold: 이전 프레임 재사용, blank: 빈 칸")
     ap.add_argument("--sync-csv", default=None, help="묶음마다 카메라별 시각 차이를 남길 csv 경로")
+    ap.add_argument("--lanes", action="store_true", help="탑뷰 바닥 영상에서 차선을 찾아 3D 화면과 탑뷰에 그림(기본 꺼짐)")
+    ap.add_argument("--lanes-every", type=int, default=1, help="차선 검출을 N 프레임마다(그 사이는 지난 결과). 기본 1")
+    ap.add_argument(
+        "--traffic-lights", action="store_true",
+        help="검출기에 COCO traffic light(9)를 더하고 상자 색(빨강, 노랑, 초록)을 판별해 화면에 그림(기본 꺼짐)",
+    )
+    ap.add_argument("--sim-curvature", type=float, default=0.0, help="sim 도로 곡률(1/m). 예: 0.006. 기본 0(곧은 도로)")
+    ap.add_argument("--sim-lights", action="store_true", help="sim 장면 앞쪽에 세로형, 가로형 신호등을 띄움")
     ap.add_argument("--skew-comp", action="store_true", help="묶음의 카메라별 시각 차이만큼 추적기에 넣는 위치를 트랙 속도로 옮김(--sync 필요)")
     return ap
 
@@ -266,8 +283,12 @@ def profile_report(args, timer: StageTimer, pipe, health_start: dict, loop: dict
             "view": args.view,
             "view3d": dataclasses.asdict(pipe.r3d.cfg) if pipe.r3d is not None else None,
             "view3d_ground_every": pipe.ground_every,
+            "lanes": args.lanes,
+            "lanes_every": args.lanes_every,
+            "traffic_lights": args.traffic_lights,
             "warmup": timer.warmup,
         },
+        "lane_light_stats": pipe.lane_light_stats,
         "seg_stats": pipe.seg_stats,
         # 탑뷰 도로 마스크 캐시: 마스크가 그대로라 합성을 건너뛴 수(hits)와 다시 합성한 수(misses)
         "road_cache": {"hits": pipe.road_cache_hits, "misses": pipe.road_cache_misses},
@@ -289,7 +310,7 @@ def profile_report(args, timer: StageTimer, pipe, health_start: dict, loop: dict
 # ---------------------------------------------------------------------------
 # DX-M1 백엔드 만들기
 # ---------------------------------------------------------------------------
-def make_dxm1_backend(npu: dict, timer: StageTimer, det: bool):
+def make_dxm1_backend(npu: dict, timer: StageTimer, det: bool, labels: dict | None = None):
     """설정의 npu 항목으로 DXM1Backend를 만든다.
 
     det=True: --backend dxm1 (검출 + 설정에 dx_seg_model이 있으면 세그도 같은 백엔드에서)
@@ -312,6 +333,7 @@ def make_dxm1_backend(npu: dict, timer: StageTimer, det: bool):
         det_format=npu.get("dx_det_format", "yolov8"),
         input_rgb=bool(npu.get("dx_input_rgb", True)),
         seg_channels_first=bool(npu.get("dx_seg_channels_first", True)),
+        labels=labels,
     )
 
 
@@ -418,15 +440,23 @@ def main() -> None:
     # 검출 백엔드에 넘길 npu 설정. 회차 모델(models.det_model_round)과 트리거용 낮은 점수 문턱을 여기서 반영한다
     det_npu, det_round = detector_npu(args, cfg, npu, trig_lo)
     timer = StageTimer(enabled=args.profile, warmup=args.warmup)
+    # --traffic-lights: 검출기가 남길 클래스에 COCO traffic light(9)를 더한다. 끄면 None(예전처럼 COCO_KEEP만)
+    det_labels = None
+    if args.traffic_lights:
+        from realityview.traffic_lights import TL_COCO_ID, TL_LABEL
+        from realityview.types import COCO_KEEP
+
+        det_labels = {**COCO_KEEP, TL_COCO_ID: TL_LABEL}
     health_start = read_pi_health() if args.profile else {}
 
     # ---- 입력과 백엔드 준비 ----
     world = None
     sources = []
     if args.backend == "sim":
-        from realityview.sim import SimBackend, SimWorld
+        from realityview.sim import SimBackend, SimWorld, default_traffic_lights
 
-        world = SimWorld(cams)
+        world = SimWorld(cams, curvature=args.sim_curvature,
+                         traffic_lights=default_traffic_lights() if args.sim_lights else None)
         backend = SimBackend(world)
     else:
         from realityview.sources import open_replay_sources, open_source
@@ -468,10 +498,11 @@ def main() -> None:
                 road_classes=npu.get("road_classes", [0]),
                 seg_every=int(npu.get("seg_every", 3)),
                 timer=timer,
+                labels=det_labels,
             )
         elif args.backend == "dxm1":
             try:
-                backend = make_dxm1_backend(det_npu, timer, det=True)
+                backend = make_dxm1_backend(det_npu, timer, det=True, labels=det_labels)
             except BaseException:
                 # 모델 파일이 없어 실패해도 이미 연 카메라는 놓아 준다
                 for s in sources:
@@ -535,6 +566,9 @@ def main() -> None:
         ground_every=args.view3d_ground_every,
         tracker=args.tracker,
         skew_comp=args.skew_comp,
+        lanes=LaneConfig() if args.lanes else None,
+        lanes_every=args.lanes_every,
+        traffic_lights=TrafficLightConfig() if args.traffic_lights else None,
     )
     if args.skew_comp and not args.sync:
         print("--skew-comp 는 --sync 와 같이 써야 동작합니다(지금은 꺼진 것과 같음)", flush=True)

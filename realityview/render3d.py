@@ -9,7 +9,19 @@ import numpy as np
 
 from .bev import BevGrid
 from .camera_model import Camera, intrinsics_from_hfov
-from .render import BG, CLASS_COLOR, EGO_REAR_OFFSET, EGO_SIZE, _even, render_ground_layer
+from .render import (
+    BG,
+    CLASS_COLOR,
+    EGO_LANE,
+    EGO_REAR_OFFSET,
+    EGO_SIZE,
+    _even,
+    dash_runs,
+    draw_light_icon,
+    ego_lane_polygon,
+    lane_bgr,
+    render_ground_layer,
+)
 from .tracker import Track
 
 # 리얼리티 뷰처럼 자차 뒤쪽 위에서 내려다보는 3D 시점 렌더러(numpy와 OpenCV만 쓴다).
@@ -84,6 +96,11 @@ GRID_STEP_M = 5.0
 NEAR_M = 0.3  # 가상 카메라 앞 이 거리보다 가까운 꼭짓점이 있는 물체는 그리지 않는다(실차 m)
 ARROW_SEC = 1.0  # 속도 화살표 길이 = 상대 속도 x 이 시간
 ARROW_MAX_M = 8.0  # 화살표 최대 길이(실차 m). 새 트랙의 튀는 속도 추정이 화면을 가로지르지 않게
+LANE_Z_M = 0.02  # 차선을 바닥보다 조금 위에 그린다(실차 m)
+EGO_LANE_ALPHA = 0.35  # 내 차선 덧칠 불투명도
+POLE_H_M = 5.0  # 신호등 기둥 높이(실차 m)
+POLE_W_M = 0.25  # 기둥 굵기
+LAMP_SIZE_M = (0.4, 1.1)  # 기둥 위 신호등 상자 (폭, 높이)
 
 
 # ---------------------------------------------------------------------------
@@ -369,8 +386,13 @@ class Renderer3D:
         coverage: np.ndarray | None = None,
         refresh_ground: bool = True,
         t: float | None = None,
+        lanes=None,
+        lights=None,
     ) -> np.ndarray:
         """3D 화면 한 장(width x height, BGR)을 돌려준다.
+
+        lanes: 차선 곡선 목록(lanes.LaneCurve). 주면 바닥 위에 곡선과 내 차선 덧칠을 그린다(기본 없음)
+        lights: 신호등 목록(traffic_lights.TrafficLight). 주면 앞쪽 기둥과 화면 오른쪽 위 아이콘을 그린다(기본 없음)
 
         refresh_ground=False이고 지난 바닥이 있으면 바닥을 다시 만들지 않는다(ground_img 등은 무시).
         t: 누적 시간(초). interp가 켜져 있으면 지난 호출과의 차이로 보간 비율을 정한다
@@ -385,6 +407,14 @@ class Renderer3D:
                 self._refresh_ground(ground_img, road_mask, coverage)
         canvas = self._ground_view.copy()
 
+        # 1-1) 차선: 바닥 다음, 물체보다 먼저(물체가 차선을 가린다). 바닥 캐시에 굽지 않아 ground_every와 상관없이 매 프레임 새로 그린다
+        if lanes:
+            if self.timer is not None:
+                with self.timer.stage("render3d_lanes"):
+                    self._draw_lanes(canvas, lanes)
+            else:
+                self._draw_lanes(canvas, lanes)
+
         # 2) 트랙 보간(선택)
         if self._smoother is not None:
             tracks = self._smoother.update(tracks, 0.0 if t is None else float(t))
@@ -398,6 +428,10 @@ class Renderer3D:
             h = CLASS_HEIGHT.get(tr.label, DEFAULT_HEIGHT) * s
             ctr = np.array([tr.xy[0], tr.xy[1], h / 2.0])
             items.append((float(np.linalg.norm(ctr - self._pos)), k + 1, "track", tr))
+        for k, lt in enumerate(lights or []):
+            if lt.xy is not None:
+                ctr = np.array([lt.xy[0], lt.xy[1], POLE_H_M * s / 2.0])
+                items.append((float(np.linalg.norm(ctr - self._pos)), len(tracks) + k + 1, "light", lt))
         items.sort(key=lambda it: (-it[0], it[1]))  # 거리가 같으면 입력 순서로(결과가 늘 같게)
 
         labels = []  # (u, v, 글자, 색): 키운 화면에 마지막에 쓴다
@@ -405,6 +439,9 @@ class Renderer3D:
             if kind == "ego":
                 for part in self._ego_parts:
                     self._draw_prism(canvas, part)
+                continue
+            if kind == "light":
+                self._draw_light_pole(canvas, tr)
                 continue
             color = CLASS_COLOR.get(tr.label, (200, 200, 200))
             h = CLASS_HEIGHT.get(tr.label, DEFAULT_HEIGHT) * s
@@ -435,4 +472,71 @@ class Renderer3D:
             u, v = int(round(uv[0, 0])), int(round(uv[0, 1]))
             if 0 <= u < self.out_w and 0 <= v < self.out_h:
                 cv2.putText(canvas, text, (u - 6, v), cv2.FONT_HERSHEY_SIMPLEX, 0.45, col, 1, cv2.LINE_AA)
+
+        # 6) 대표 신호등 아이콘: 화면 오른쪽 위(거리를 주장하지 않는 표시라 보정 전에도 믿을 수 있다)
+        if lights:
+            from .traffic_lights import main_light
+
+            lt = main_light(lights)
+            if lt is not None:
+                horiz = lt.orientation == "horizontal"
+                iw = 3 * 22 + 4 if horiz else 26
+                draw_light_icon(canvas, lt.state, self.out_w - iw - 30, 12, lt.orientation)
         return canvas
+
+    # ---- 차선 -----------------------------------------------------------
+    def _ground_polyline(self, pts_xy: np.ndarray) -> list[np.ndarray]:
+        """바닥 위 점(N,2)을 투영해 가상 카메라 near보다 앞인 연속 구간만 화소(int32) 조각으로 돌려준다."""
+        if len(pts_xy) < 2:
+            return []
+        uv, z = self.project(np.c_[pts_xy, np.full(len(pts_xy), LANE_Z_M * self.scale)])
+        ok = (z >= self._near) & (np.abs(uv).max(axis=1) < 8 * max(self.rw, self.rh))
+        out, start = [], None
+        for i, v in enumerate(ok):
+            if v and start is None:
+                start = i
+            if (not v or i == len(ok) - 1) and start is not None:
+                end = i + 1 if v else i
+                if end - start >= 2:
+                    out.append(np.round(uv[start:end]).astype(np.int32))
+                start = None
+        return out
+
+    def _draw_lanes(self, canvas: np.ndarray, lanes) -> None:
+        """내 차선을 반투명 파랑으로 칠하고, 차선 곡선을 색과 실선/점선으로 그린다."""
+        s = self.scale
+        step = 0.5 * s
+        x_near = self._pos[0] + self._near + 0.5 * s  # 가상 카메라 바로 앞부터
+        poly = ego_lane_polygon(lanes, step, x_min=x_near)
+        if poly is not None:
+            uv, z = self.project(np.c_[poly, np.zeros(len(poly))])
+            if np.all(z >= self._near):
+                ipts = np.round(uv).astype(np.int32)
+                H, W = canvas.shape[:2]
+                x0, y0 = np.maximum(ipts.min(axis=0), 0)
+                x1, y1 = np.minimum(ipts.max(axis=0) + 1, [W, H])
+                if x1 > x0 and y1 > y0:
+                    roi = canvas[y0:y1, x0:x1]
+                    layer = roi.copy()
+                    cv2.fillPoly(layer, [ipts - [x0, y0]], EGO_LANE, cv2.LINE_AA)
+                    cv2.addWeighted(layer, EGO_LANE_ALPHA, roi, 1.0 - EGO_LANE_ALPHA, 0.0, dst=roi)
+        thick = max(1, int(round(3 * self.cfg.render_scale)))
+        for ln in lanes:
+            col = lane_bgr(ln.color)
+            for run in dash_runs(ln.points(step / 2, x_min=x_near), ln.style == "dashed", s):
+                for px in self._ground_polyline(run):
+                    cv2.polylines(canvas, [px], False, col, thick, cv2.LINE_AA)
+
+    # ---- 신호등 기둥 ----------------------------------------------------
+    def _draw_light_pole(self, canvas: np.ndarray, lt) -> None:
+        """신호등 방향, 앞쪽 일정 거리(pole_m)에 기둥과 상태 색 상자를 세운다. 거리는 표시용이다."""
+        from .traffic_lights import STATE_BGR
+
+        s = self.scale
+        xy = np.asarray(lt.xy, dtype=np.float64)
+        self._draw_prism(canvas, _Prism(box_base(xy, POLE_W_M * s, POLE_W_M * s), 0.0, POLE_H_M * s, (90, 90, 90), 1.0))
+        lw, lh = LAMP_SIZE_M
+        if lt.orientation == "horizontal":
+            lw, lh = lh, lw
+        lamp = _Prism(box_base(xy, 0.3 * s, lw * s), POLE_H_M * s, (POLE_H_M + lh) * s, STATE_BGR[lt.state], 1.0)
+        self._draw_prism(canvas, lamp)

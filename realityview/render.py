@@ -153,8 +153,13 @@ def render_bev(
     coverage: np.ndarray | None = None,
     show_ids: bool = True,
     scale: float = 1.0,
+    lanes=None,
+    lights=None,
 ) -> np.ndarray:
     """탑뷰 한 장을 새로 그린다.
+
+    lanes: 차선 곡선 목록(lanes.LaneCurve). 주면 내 차선을 칠하고 곡선을 그린다(기본 없음)
+    lights: 신호등 목록(traffic_lights.TrafficLight). 주면 왼쪽 위에 대표 신호등 아이콘을 그린다(기본 없음)
 
     scale: 장면 축척. 모형이면 자차 크기, 보행자 점 크기, 거리 고리 간격을 같은 비율로 줄인다.
 
@@ -164,6 +169,8 @@ def render_bev(
     """
     # ---- 1), 2) 바닥 영상과 도로 마스크(3D 시점도 같은 함수로 바닥을 만든다) ----
     canvas = render_ground_layer(grid, ground_img, road_mask, coverage)
+    if lanes:
+        draw_lanes_bev(canvas, grid, lanes, scale)
 
     # ---- 3) 거리 고리, 자차 ----
     _draw_rings(canvas, grid, scale)
@@ -188,7 +195,110 @@ def render_bev(
                 canvas, str(t.tid), (int(c[0]) + 8, int(c[1]) - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (240, 240, 240), 1,
                 cv2.LINE_AA,
             )
+    if lights:
+        from .traffic_lights import main_light
+
+        lt = main_light(lights)
+        if lt is not None:
+            draw_light_icon(canvas, lt.state, 10, 10, lt.orientation)
     return canvas
+
+
+# ---------------------------------------------------------------------------
+# 차선과 신호등(탑뷰와 3D 시점이 같이 쓴다)
+# ---------------------------------------------------------------------------
+EGO_LANE = (230, 150, 40)  # 내 차선 덧칠 색(파랑, BGR)
+DASH_ON_M = 3.0  # 점선 한 칸 길이(실차 m)
+DASH_PERIOD_M = 9.0  # 점선 한 주기(칠한 칸 + 빈칸)
+
+
+def lane_bgr(color: str) -> tuple:
+    from .lanes import LANE_BGR
+
+    return LANE_BGR.get(color, LANE_BGR["white"])
+
+
+def dash_runs(pts: np.ndarray, dashed: bool, scale: float = 1.0) -> list[np.ndarray]:
+    """곡선 위 점(N,2: X, Y)을 그릴 조각으로 나눈다. 실선은 통째로, 점선은 X 기준 DASH_ON_M씩 끊는다.
+
+    점선 무늬의 위치는 실제 도로 점선과 맞추지 않은 표시용이다(실선과 구별되기만 하면 된다).
+    """
+    if len(pts) < 2:
+        return []
+    if not dashed:
+        return [pts]
+    on = np.mod(pts[:, 0], DASH_PERIOD_M * scale) < DASH_ON_M * scale
+    runs, start = [], None
+    for i, v in enumerate(on):
+        if v and start is None:
+            start = i
+        if (not v or i == len(on) - 1) and start is not None:
+            end = i + 1 if v else i
+            if end - start >= 2:
+                runs.append(pts[start:end])
+            start = None
+    return runs
+
+
+def ego_lane_polygon(lanes, step: float, x_min: float | None = None, x_max: float | None = None):
+    """내 차선(왼쪽, 오른쪽 경계 사이) 다각형의 차량 좌표 점(N,2). 경계가 둘 다 없으면 None."""
+    left = next((l for l in lanes if l.side == "left"), None)
+    right = next((l for l in lanes if l.side == "right"), None)
+    if left is None or right is None:
+        return None
+    x0 = max(left.x_range[0], right.x_range[0], -np.inf if x_min is None else x_min)
+    x1 = min(left.x_range[1], right.x_range[1], np.inf if x_max is None else x_max)
+    if x1 - x0 < step:
+        return None
+    xs = np.linspace(x0, x1, max(2, int((x1 - x0) / step) + 1))
+    return np.vstack([np.c_[xs, left.y_at(xs)], np.c_[xs[::-1], right.y_at(xs[::-1])]])
+
+
+def draw_lanes_bev(canvas: np.ndarray, grid: BevGrid, lanes, scale: float = 1.0) -> None:
+    """탑뷰에 내 차선 덧칠(반투명)과 차선 곡선(실선, 점선, 색)을 그린다(canvas를 그 자리에서 고침)."""
+    step = 0.5 * scale
+    poly = ego_lane_polygon(lanes, step)
+    if poly is not None:
+        px = grid.to_pixel(poly).round().astype(np.int32)
+        x0, y0 = np.maximum(px.min(axis=0), 0)
+        x1, y1 = np.minimum(px.max(axis=0) + 1, [canvas.shape[1], canvas.shape[0]])
+        if x1 > x0 and y1 > y0:
+            roi = canvas[y0:y1, x0:x1]
+            layer = roi.copy()
+            cv2.fillPoly(layer, [px - [x0, y0]], EGO_LANE, cv2.LINE_AA)
+            cv2.addWeighted(layer, 0.35, roi, 0.65, 0.0, dst=roi)
+    thick = max(2, int(round(0.15 * scale / grid.res)))
+    for ln in lanes:
+        col = lane_bgr(ln.color)
+        for run in dash_runs(ln.points(step / 2), ln.style == "dashed", scale):
+            px = grid.to_pixel(run).round().astype(np.int32)
+            cv2.polylines(canvas, [px], False, col, thick, cv2.LINE_AA)
+
+
+def draw_light_icon(canvas: np.ndarray, state: str, x: int, y: int, orientation: str = "vertical",
+                    lamp: int = 9) -> None:
+    """(x, y)를 왼쪽 위로 하는 신호등 아이콘. 켜진 색 하나만 밝게, 나머지는 어둡게 그린다.
+
+    가로형 신호등이면 아이콘도 가로로 눕힌다. 모름이면 세 등 모두 어둡고 가운데에 '?'를 쓴다.
+    """
+    from .traffic_lights import STATE_BGR
+
+    horiz = orientation == "horizontal"
+    gap = lamp * 2 + 4
+    w, h = (gap * 3 + 4, gap + 4) if horiz else (gap + 4, gap * 3 + 4)
+    H, W = canvas.shape[:2]
+    if x + w > W or y + h > H or x < 0 or y < 0:
+        return
+    cv2.rectangle(canvas, (x, y), (x + w, y + h), (25, 25, 25), -1)
+    cv2.rectangle(canvas, (x, y), (x + w, y + h), (180, 180, 180), 1)
+    for k, s in enumerate(("red", "yellow", "green")):
+        cx = x + 2 + gap // 2 + (gap * k if horiz else 0)
+        cy = y + 2 + gap // 2 + (0 if horiz else gap * k)
+        col = STATE_BGR[s] if s == state else (55, 55, 55)
+        cv2.circle(canvas, (cx, cy), lamp, col, -1, cv2.LINE_AA)
+    if state == "unknown":
+        cv2.putText(canvas, "?", (x + w + 4, y + h // 2 + 6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2,
+                    cv2.LINE_AA)
 
 
 def _draw_rings(canvas: np.ndarray, grid: BevGrid, scale: float = 1.0) -> None:

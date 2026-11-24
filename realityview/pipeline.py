@@ -10,10 +10,12 @@ import numpy as np
 from .bev import BevGrid, IpmCompositor, merge_cross_camera, project_detections
 from .camera_model import Camera
 from .detectors import Backend, SegBackend
+from .lanes import LaneConfig, LaneCurve, LaneDetector, LaneSmoother, box_masks, snapshot_lanes
 from .profiling import StageTimer
 from .render import annotate_camera, compose_dashboard, compose_dashboard_3d, render_bev
 from .render3d import Renderer3D, View3DConfig
 from .tracker import BevTracker, Track
+from .traffic_lights import AERIAL_LABELS, TrafficLight, TrafficLightConfig, TrafficLightReader
 from .types import FrameResult
 
 # 한 프레임 처리 순서
@@ -21,6 +23,8 @@ from .types import FrameResult
 # 렌더링은 기본으로 같은 스레드에서 하고, render_thread=True면 별도 스레드에서 한다.
 # seg_backend를 주면 도로 세그를 다른 NPU에서 별도 스레드로 N 프레임마다 돌리고, 늦으면 최근 마스크를 쓴다.
 # view로 화면을 고른다: "bev"(기본, 탑뷰), "3d"(자차 뒤쪽 위 시점), "both"(탑뷰와 3D를 나란히).
+# lanes를 주면 탑뷰 바닥 영상에서 차선을 찾고(lanes.py), traffic_lights를 주면 신호등 상자의 색을 판별한다
+# (traffic_lights.py). 둘 다 기본은 꺼져 있다. 신호등 같은 공중 물체(AERIAL_LABELS)는 늘 지면 투영에서 뺀다.
 
 
 # ---------------------------------------------------------------------------
@@ -34,6 +38,8 @@ class StepOutput:
     results: list[FrameResult]
     timings: dict  # 이번 프레임의 대략적인 구간 시간(ms). 자세한 통계는 StageTimer로 본다
     view3d: np.ndarray | None = None  # 3D 시점 화면만(view가 "3d", "both"일 때)
+    lanes: list[LaneCurve] | None = None  # 차선 곡선(평활 후). lanes 옵션이 꺼져 있으면 None
+    lights: list[TrafficLight] | None = None  # 신호등 상태. traffic_lights 옵션이 꺼져 있으면 None
 
 
 @dataclass
@@ -48,6 +54,8 @@ class _RenderJob:
     fps: float | None
     t: float = 0.0  # step()에 넘긴 dt를 더한 시각(초). 3D 트랙 보간에 쓴다
     refresh_ground: bool = True  # 3D 바닥을 이번에 다시 만들지(ground_every 프레임마다)
+    lanes: list[LaneCurve] | None = None
+    lights: list[TrafficLight] | None = None
 
 
 def _snapshot_tracks(tracks: list[Track]) -> list[Track]:
@@ -240,6 +248,9 @@ class RealityViewPipeline:
         ground_every: int = 1,  # 3D 바닥(IPM 텍스처)을 몇 프레임마다 다시 만들지. 1이면 매 프레임
         tracker: str = "basic",  # 추적기 방식: "basic"(기본, 예전과 같음), "robust"(먼 물체 ID 쪼개짐 개선판)
         skew_comp: bool = False,  # True면 step()에 준 카메라별 시각 차이만큼 물체 위치를 트랙 속도로 옮긴다(기본 꺼짐)
+        lanes: LaneConfig | None = None,  # 주면 차선 검출을 켠다(기본 꺼짐)
+        lanes_every: int = 1,  # 차선 검출을 몇 프레임마다 할지. 그 사이는 지난 결과를 쓴다
+        traffic_lights: TrafficLightConfig | None = None,  # 주면 신호등 색 판별을 켠다(기본 꺼짐)
     ):
         self.cameras = cameras
         self.scale = float(scale)
@@ -267,6 +278,17 @@ class RealityViewPipeline:
         self.seg_every = max(1, int(seg_every))
         self._seg = _SegWorker(seg_backend.segment, self.timer) if seg_backend is not None else None
         self._frame_idx = 0
+        # 차선과 신호등(옵션)
+        self.lane_detector = LaneDetector(self.grid, lanes, self.ipm.coverage(), self.scale) if lanes else None
+        self.lane_smoother = LaneSmoother(lanes, self.scale) if lanes else None
+        self.lanes_every = max(1, int(lanes_every))
+        self._lanes: list[LaneCurve] | None = [] if lanes else None
+        self.light_reader = TrafficLightReader(cameras, traffic_lights, self.scale) if traffic_lights else None
+        # 차선과 신호등 통계(측정 기록용): 차선 검출 횟수, 찾은 곡선 수 합, 내 차선 양쪽을 찾은 횟수, 신호등 색별 수
+        self._lane_runs = 0
+        self._lane_sum = 0
+        self._lane_ego = 0
+        self._light_counts: dict[str, int] = {}
         self._seg_ages: list[int] = []  # 프레임마다 쓴 마스크가 몇 프레임 묵었는지(마스크가 있을 때만)
         self._seg_missing = 0  # 아직 첫 마스크가 없어 마스크 없이 지나간 프레임 수
         self._seg_last_idx = None  # 마지막으로 도로 비율을 센 마스크의 프레임 번호
@@ -314,6 +336,22 @@ class RealityViewPipeline:
             "mask_fraction_mean": float(np.mean(self._seg_fracs)) if self._seg_fracs else None,
         }
 
+    @property
+    def lane_light_stats(self) -> dict | None:
+        """차선과 신호등 통계. 둘 다 꺼져 있으면 None.
+
+        lane_runs: 차선 검출을 한 횟수, lanes_mean: 한 번에 남은(평활 후) 곡선 수 평균,
+        ego_both_frac: 내 차선 왼쪽과 오른쪽 경계를 모두 찾은 비율, light_states: 신호등 색별 누적 수(다수결 후)
+        """
+        if self.lane_detector is None and self.light_reader is None:
+            return None
+        return {
+            "lane_runs": self._lane_runs,
+            "lanes_mean": round(self._lane_sum / self._lane_runs, 3) if self._lane_runs else None,
+            "ego_both_frac": round(self._lane_ego / self._lane_runs, 3) if self._lane_runs else None,
+            "light_states": dict(self._light_counts),
+        }
+
     # ---- 한 프레임 처리 -------------------------------------------------
     def step(self, frames: list[np.ndarray], dt: float, cam_offsets_s: list[float] | None = None) -> StepOutput:
         """한 프레임을 처리한다.
@@ -339,11 +377,20 @@ class RealityViewPipeline:
         if self._seg is not None:
             self._attach_async_masks(idx, results)
 
-        # 2) 검출 박스의 접지점을 지면(차량 좌표)으로 투영
+        # 1-2) 신호등 색(옵션): 상자를 잘라 HSV로 판별하고 프레임 간 다수결
+        lights = None
+        if self.light_reader is not None:
+            with tm.stage("traffic_lights"):
+                lights = self.light_reader.update(frames, [r.detections for r in results])
+            for lt in lights:
+                self._light_counts[lt.state] = self._light_counts.get(lt.state, 0) + 1
+
+        # 2) 검출 박스의 접지점을 지면(차량 좌표)으로 투영. 신호등은 공중에 있어 바닥 투영이 틀리므로 뺀다
         with tm.stage("ipm_project"):
             objs = []
             for i, (cam, r) in enumerate(zip(self.cameras, results)):
-                objs += project_detections(i, cam, r.detections, max_range=40.0 * self.scale, scale=self.scale)
+                dets = [d for d in r.detections if d.label not in AERIAL_LABELS]
+                objs += project_detections(i, cam, dets, max_range=40.0 * self.scale, scale=self.scale)
 
         # 2-1) 시각 맞춤 보정(옵션): 기준보다 앞뒤로 찍힌 카메라의 물체를 기준 시각 위치로 옮긴다
         if self.skew_comp and cam_offsets_s is not None:
@@ -365,9 +412,26 @@ class RealityViewPipeline:
         refresh = idx % self.ground_every == 0
         #    렌더링 스레드 모드에서는 버린 작업의 갱신을 다음 작업이 이어받을 수 있게 늘 합성한다
         need_ground = self.show_ground and (self.view != "3d" or refresh or self._worker is not None)
+        #    차선 검출 차례이면 화면에 바닥을 안 깔아도(--no-ground) 바닥 영상을 합성한다
+        lane_turn = self.lane_detector is not None and idx % self.lanes_every == 0
         with tm.stage("bev_warp"):
-            ground = self.ipm.warp(frames) if need_ground else None
+            ground = self.ipm.warp(frames) if (need_ground or lane_turn) else None
             road = self._warp_road(results, frames)
+        # 5-1) 차선(옵션): 차례인 프레임에만 찾고 평활한다. 그 사이 프레임은 지난 결과를 그대로 쓴다
+        if lane_turn:
+            with tm.stage("lanes"):
+                occ = None
+                if self.lane_detector.cfg.mask_objects:
+                    # 검출 상자 안 화소(차체)가 IPM에서 바닥으로 길게 늘어져 차선처럼 보이는 것을 뺀다.
+                    # 상자가 없는 프레임은 합성을 건너뛴다(추가 시간 0)
+                    masks = box_masks([f.shape[:2] for f in frames], [r.detections for r in results], AERIAL_LABELS)
+                    occ = self.ipm.warp(masks, interpolation=0) if masks is not None else None
+                self._lanes = self.lane_smoother.update(self.lane_detector.detect(ground, road, occ))
+            self._lane_runs += 1
+            self._lane_sum += len(self._lanes)
+            self._lane_ego += int({"left", "right"} <= {ln.side for ln in self._lanes})
+        if not need_ground:
+            ground = None  # 차선 때문에 합성한 바닥은 화면에 깔지 않는다(예전 화면 그대로)
         self._time += float(dt)
         t2 = time.perf_counter()
 
@@ -378,13 +442,15 @@ class RealityViewPipeline:
         self._last_step_t = t0
 
         # 6) 렌더링(탑뷰, 카메라 주석, 대시보드 합치기)
-        job = _RenderJob(tracks, ground, road, frames, results, self._fps, t=self._time, refresh_ground=refresh)
+        job = _RenderJob(tracks, ground, road, frames, results, self._fps, t=self._time, refresh_ground=refresh,
+                         lanes=self._lanes, lights=lights)
         if self._worker is None:
             with tm.stage("render"):
                 dash, bev, v3d = self._render(job)
             self._sync_renders += 1
         else:
             job.tracks = _snapshot_tracks(tracks)
+            job.lanes = snapshot_lanes(self._lanes)  # 다음 프레임 평활이 같은 곡선을 고치므로 사본을 넘긴다
             latest = self._worker.latest()
             if latest is None:
                 # 첫 프레임은 보여 줄 결과가 없으므로 직접 그린다(호출자가 None을 받지 않게)
@@ -397,7 +463,7 @@ class RealityViewPipeline:
         t3 = time.perf_counter()
 
         timings = {"npu_ms": (t1 - t0) * 1e3, "bev_ms": (t2 - t1) * 1e3, "render_ms": (t3 - t2) * 1e3}
-        return StepOutput(dash, bev, tracks, results, timings, v3d)
+        return StepOutput(dash, bev, tracks, results, timings, v3d, lanes=self._lanes, lights=lights)
 
     def _warp_road(self, results: list[FrameResult], frames: list[np.ndarray]) -> np.ndarray | None:
         """카메라별 도로 마스크를 탑뷰 한 장으로 합성한다. 마스크가 지난 프레임과 같으면 지난 결과를 다시 쓴다.
@@ -451,13 +517,15 @@ class RealityViewPipeline:
         """
         bev = None
         if self.view in ("bev", "both"):
-            bev = render_bev(self.grid, job.tracks, job.ground, job.road, self.ipm.coverage(), scale=self.scale)
+            bev = render_bev(self.grid, job.tracks, job.ground, job.road, self.ipm.coverage(), scale=self.scale,
+                             lanes=job.lanes, lights=job.lights)
         v3d = None
         if self.r3d is not None:
             # 렌더링 스레드에서 불려도 timer.stage는 잠금으로 더하므로 안전하다(그 프레임 몫으로 들어간다)
             with self.timer.stage("render3d"):
                 v3d = self.r3d.render(
-                    job.tracks, job.ground, job.road, self.ipm.coverage(), refresh_ground=job.refresh_ground, t=job.t
+                    job.tracks, job.ground, job.road, self.ipm.coverage(), refresh_ground=job.refresh_ground, t=job.t,
+                    lanes=job.lanes, lights=job.lights,
                 )
         views = []
         if self.show_cameras:
