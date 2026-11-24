@@ -1,0 +1,36 @@
+# 학습 서버(WSL2 Ubuntu 22.04, Python 3.10, NVIDIA 드라이버와 CUDA 가 잡힌 상태) 주 가상환경.
+# 자동 라벨(Grounding DINO, SAM 2)과 YOLOv8s 학습, 평가가 이 환경 하나에서 돕니다.
+# torch 는 CUDA 판 바퀴를 받아야 하므로 아래 두 줄을 먼저 따로 설치합니다(docs/training_pipeline.md 3장).
+#   pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu121
+# SAM 2 는 torch 2.5.1 이상을 요구합니다(저장소 setup.py 기준, 설치할 때 확인 필요).
+
+numpy==1.26.4                      # Grounding DINO, supervision 과 함께 쓰려고 1.x 로 고정(2.x 호환은 확인 필요)
+opencv-python-headless==4.10.0.84
+pyyaml==6.0.2
+pytest==8.3.4
+ultralytics==8.4.19                # 맥에서 train, val, export 인자 이름을 확인한 판
+onnx==1.17.0                       # ONNX 내보내기(Ultralytics 가 없으면 스스로 설치하려 하므로 미리 넣음, 판 확인 필요)
+onnxslim==0.1.48                   # simplify=True 에 씀(판 확인 필요)
+
+# Grounding DINO 와 SAM 2 는 PyPI 판이 아니라 공식 저장소를 받아 편집 설치합니다(커밋은 설치할 때 기록, 확인 필요).
+#   git clone https://github.com/IDEA-Research/GroundingDINO && pip install -e GroundingDINO
+#   git clone https://github.com/facebookresearch/sam2 && pip install -e sam2
+# Grounding DINO 는 CUDA 확장을 빌드하므로 torch 의 CUDA 판(cu121)과 같은 nvcc 가 PATH 에 있어야 합니다.
+supervision==0.25.1                # Grounding DINO 의 의존성(판 확인 필요)
+transformers==4.46.3               # Grounding DINO 의 BERT 문장 인코더(판 확인 필요)
+timm==1.0.12                       # Grounding DINO 의존성(판 확인 필요)
+addict==2.4.0
+yapf==0.40.2
+pycocotools==2.0.8
+
+# 아래는 주 환경과 섞지 않고 따로 만듭니다(서로 torch, numpy 판 요구가 달라 충돌함).
+#
+# 세그 환경(mmsegmentation 1.x). mmcv 2.1.0 의 미리 빌드된 바퀴는 torch 2.1 까지만 있어 torch 2.1.2 로 따로 둡니다(확인 필요).
+#   python3 -m venv ~/venv-seg && . ~/venv-seg/bin/activate
+#   pip install torch==2.1.2 torchvision==0.16.2 --index-url https://download.pytorch.org/whl/cu121
+#   pip install -U openmim && mim install mmengine==0.10.5 "mmcv==2.1.0" && pip install mmsegmentation==1.2.2
+#
+# Hailo 환경(Dataflow Compiler 3.x + Model Zoo v2.x 브랜치, Hailo-8). Hailo 개발자 사이트에서 로그인 후 받습니다.
+#   DFC 판은 파이의 HailoRT 판과 맞아야 HEF 가 돕니다. 파이에서 `hailortcli fw-control identify` 로 보고 고릅니다(확인 필요).
+#
+# DEEPX 환경(DX-COM, x86_64). DEEPX 개발자 사이트에서 받습니다. 판은 파이의 DX-RT 판과 맞춥니다(확인 필요).

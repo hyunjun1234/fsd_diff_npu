@@ -27,6 +27,8 @@
 
 주행 수집 도구를 만들었습니다. `scripts/record_drive.py`는 NPU 추론 없이 카메라 전부를 세그먼트 단위 MJPEG와 타임스탬프 csv로 녹화하고(카메라 2대 30fps에서 누락 0, 한 시간 약 7.1GB), `run_demo.py --trigger-clips`는 애매한 점수, 추적 ID 변화, 두 NPU 불일치가 나온 순간을 앞뒤로 저장하며, `--shadow`는 두 NPU에 다른 회차 모델을 올려 비교합니다. 사용법은 [주행 녹화 문서](drive_recording.md)에 있습니다.
 
+학습 서버 쪽 파이프라인(`training/`)도 만들었습니다. 프레임 선별, Grounding DINO와 SAM 2 자동 라벨, CVAT 내보내기와 다시 읽기, 라벨 검수 지표, YOLOv8s 추가 학습(COCO 일부 섞기), 고정 시험 세트 평가, Hailo와 DEEPX 변환 명령 생성, 파이 배포까지 `python3 -m training.run_round` 하나로 돌립니다. 맥에서는 가짜 라벨러와 학습기로 끝까지 시험했고(37개 통과), 실제 실행은 데스크탑 WSL2에서 합니다. 순서는 [학습 파이프라인 문서](training_pipeline.md)에 있습니다.
+
 ## 장비 구성
 
 라즈베리파이 5(Debian 13, 64비트)에 Seeed 듀얼 M.2 HAT로 Hailo-8과 DX-M1 4GB를 함께 달았고, 두 NPU 모두 PCIe Gen3 x1로 인식됩니다. 런타임은 HailoRT 4.23.0, DXRT 3.4.2이고, `dx_engine`은 파이 저장소의 `.venv`에만 있습니다.
@@ -85,7 +87,8 @@ cd ~/Desktop/App/fsd_diff_npu && python ~/Desktop/App/fsd_agent.py --task-file d
 5. 동시 실행 판정 기준 결정: 1단계 기록(14.2 FPS) 기준이면 통과, 같은 코드의 Hailo 단독(26.2 FPS) 기준이면 25% 낮습니다.
 6. 진짜 반대 배치(세그 Hailo, 검출 DX-M1)를 재려면 Hailo 도로 세그 HEF(예: Hailo Model Zoo의 stdc1)를 받을지 결정. 지금 배치(검출 Hailo, 세그 DX-M1)가 대용 비교에서 더 빨랐습니다.
 7. 몇 시간씩 녹화하려면 SSD 장착(SD 카드로는 약 3.3시간), 차량에서 ACC 꺼짐에 맞춰 종료 신호를 보내는 전원 장치 설정.
-8. Hailo DFC와 DX-COM 컴파일, FlashOcc 학습이 필요해지면 x86 리눅스 GPU 서버 연결.
+8. 데스크탑 WSL2에 학습 환경을 설치하고 `python3 -m pytest -q training`이 통과하는지 확인. 그다음 Grounding DINO와 SAM 2 설치, 지금 쓰는 YOLOv8s를 다시 변환해 파이 결과와 같은지 확인.
+9. Hailo DFC와 DX-COM 컴파일, FlashOcc 학습이 필요해지면 x86 리눅스 GPU 서버 연결.
 
 ## 알려진 문제
 
@@ -115,5 +118,6 @@ cd ~/Desktop/App/fsd_diff_npu && python ~/Desktop/App/fsd_agent.py --task-file d
 | 10 3D 시점 렌더러 | 8.40달러 |
 | 11 추적기와 카메라 지연 | 5.87달러 |
 | 12 주행 수집 도구 | 8.05달러 |
+| 13 학습 파이프라인 | 11.32달러 |
 
-합계는 76.25달러에 끊긴 실행 한 번이 더해집니다. 실제 금액은 Console의 Cost 페이지가 기준입니다.
+합계는 87.57달러에 끊긴 실행 한 번이 더해집니다. 실제 금액은 Console의 Cost 페이지가 기준입니다.
