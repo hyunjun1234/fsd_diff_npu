@@ -1,6 +1,6 @@
 # 엣지 NPU 사양 비교: Hailo-8, 8L, 10H와 DEEPX DX-M1
 
-이 문서는 라즈베리파이 5에 붙일 수 있는 NPU의 사양을 모아, 테슬라 AI4에서 리얼리티 뷰가 쓰는 연산량과 비교한 자료입니다. 작성일은 2026-11-24입니다.
+이 문서는 라즈베리파이 5에 붙일 수 있는 NPU의 사양을 모아, 테슬라 AI4에서 리얼리티 뷰가 쓰는 연산량과 비교한 자료입니다.
 
 테슬라 쪽 수치는 [FSD v15 리얼리티 뷰 기술 조사](01_fsd_v15_reality_view_research.md)에 있습니다. 연산자 지원 여부(grid_sample, scatter 등)와 BEV 모델 방식 비교, 단계별 계획은 [엣지 NPU 구성과 모델 선정](edge_npu_model_selection.md)에서 다루므로 여기서는 되풀이하지 않습니다. 이 문서는 Hailo-10H(AI HAT+ 2)를 더하고, 리얼리티 뷰 v15처럼 영상을 생성하는 방식에 각 NPU가 맞는지를 봅니다.
 
@@ -23,7 +23,7 @@
 | 보드 메모리 | 없습니다. 라즈베리파이의 메모리를 씁니다. (공식 [N1]) | 없습니다. (공식 [N1]) | 8GB (공식 [N2]). 종류는 공식 표기가 없고, 모듈 기준으로는 LPDDR4 또는 4X입니다. (3자 [N5]) | LPDDR5 4GB (3자 [N6][N7]). Radxa DX-M1M 2242는 LPDDR4X 1GB로 소개되어 출처마다 다릅니다. (3자 [N8]) |
 | 라즈베리파이 5 연결 | PCIe(FPC 리본 케이블). 라즈베리파이 쪽은 1레인입니다. | Hailo-8L과 같습니다. | PCIe Gen3 1레인, FPC (3자 [N4]) | M.2 HAT+를 거칩니다. 모듈은 Gen3 4레인이고 1레인으로도 동작합니다. (3자 [N6][N8]) |
 | 전력 | 모듈 최대 6.6W (3자 [N5]) | 모듈 최대 8.25W (3자 [N5]) | 모듈 일반 2.5W (3자 [N5]) | 2~5W (3자 [N6][N9]), 일반 3W (3자 [N8]) |
-| 가격 | 약 70달러 (3자 [N5]) | 약 110달러 (3자 [N5]) | 200달러(현재 공식가, 공식 [N2]). 출시 때는 130달러였습니다. (공식 [N3]) | DFRobot 139달러 (3자 [N9]), Radxa DX-M1M 85~98달러 (3자 [N8]) |
+| 가격 | 약 70달러 (3자 [N5]) | 약 110달러 (3자 [N5]) | 200달러 (공식 [N2]) | DFRobot 139달러 (3자 [N9]), Radxa DX-M1M 85~98달러 (3자 [N8]) |
 | 공식 지원 모델 | CNN(검출, 세그멘테이션, 자세 추정) (공식 [N1]) | Hailo-8L과 같습니다. (공식 [N1]) | CNN과 LLM, VLM. 출시 때 모델은 DeepSeek-R1-Distill 1.5B, Llama 3.2 1B, Qwen2.5 1.5B 등입니다. 약 1B~7B까지 (공식 [N3]), 문서에는 약 6B까지로 적혀 있습니다. (공식 [N1]) | 검출, 분류, 세그멘테이션, 자세 추정, 노이즈 제거 같은 CNN (3자 [N8]) |
 | 확산 모델 | 해당 없음 | 해당 없음 | 확인 필요 | 확인 필요 |
 | 개발 도구 | Dataflow Compiler로 HEF 파일을 만들고 HailoRT로 실행합니다. (공식 [N3], 3자 [N5]) | Hailo-8L과 같습니다. | 같은 도구에 hailo-ollama와 LoRA 어댑터 컴파일이 더해집니다. (공식 [N3]) | DXNN SDK. DX-COM(컴파일), DX-RT(실행), DX-STREAM(GStreamer) (3자 [N8]) |
@@ -76,10 +76,10 @@ TOPS의 자릿수만 보면 엣지 NPU 하나가 리얼리티 뷰 렌더러의 �
 |---|---|---|
 | N1 | [AI HATs, Raspberry Pi Documentation](https://www.raspberrypi.com/documentation/accessories/ai-hat-plus.html) | 공식 |
 | N2 | [Raspberry Pi AI HAT+ 2 제품 페이지](https://www.raspberrypi.com/products/ai-hat-plus-2/) | 공식 |
-| N3 | [Introducing the Raspberry Pi AI HAT+ 2, Raspberry Pi News](https://www.raspberrypi.com/news/introducing-the-raspberry-pi-ai-hat-plus-2-generative-ai-on-raspberry-pi-5/) (2026-01-15) | 공식 |
+| N3 | [Introducing the Raspberry Pi AI HAT+ 2, Raspberry Pi News](https://www.raspberrypi.com/news/introducing-the-raspberry-pi-ai-hat-plus-2-generative-ai-on-raspberry-pi-5/) | 공식 |
 | N4 | [Raspberry Pi AI HAT+ 2 targets generative AI, CNX Software](https://www.cnx-software.com/2026/01/15/raspberry-pi-ai-hat-2-targets-generative-ai-llm-vlm-with-hailo-10h-accelerator/), [Raspberry Pi AI HAT+ 2 review, Tom's Hardware](https://www.tomshardware.com/uk/raspberry-pi/raspberry-pi-ai-hat-plus-2-review) | 리뷰 |
-| N5 | [Hailo-8 vs Hailo-8L vs Hailo-10H, Electromaker](https://www.electromaker.io/blog/article/hailo-8-vs-hailo-8l-vs-hailo-10h-which-ai-accelerator-should-you-buy) (2026-09-11) | 3자, Hailo 데이터시트 인용 |
+| N5 | [Hailo-8 vs Hailo-8L vs Hailo-10H, Electromaker](https://www.electromaker.io/blog/article/hailo-8-vs-hailo-8l-vs-hailo-10h-which-ai-accelerator-should-you-buy) | 3자, Hailo 데이터시트 인용 |
 | N6 | [DX-M1 AI Accelerator (DFR1252), DFRobot Wiki](https://wiki.dfrobot.com/dfr1252/) | 판매사 |
 | N7 | [Radxa AICore DX-M1/DX-M1M, Radxa Docs](https://docs.radxa.com/en/aicore/dx-m1) | 판매사 |
-| N8 | [Radxa AICore DX-M1M M.2 2242, CNX Software](https://www.cnx-software.com/2026/03/21/radxa-aicore-dx-m1m-m-2-2242-low-power-ai-module-delivers-25-tops-of-edge-ai-performance-for-just-3w-of-power/) (2026-03-21) | 리뷰 |
+| N8 | [Radxa AICore DX-M1M M.2 2242, CNX Software](https://www.cnx-software.com/2026/03/21/radxa-aicore-dx-m1m-m-2-2242-low-power-ai-module-delivers-25-tops-of-edge-ai-performance-for-just-3w-of-power/) | 리뷰 |
 | N9 | [DFRobot DX-M1 25 TOPS M.2 AI accelerator, Wccftech](https://wccftech.com/dfrobot-dx-m1-25-tops-m2-ai-accelerator-module-raspberry-pi-pc/), [DEEPX DX-M1, DigiKey](https://www.digikey.com/en/product-highlight/d/deepx/dx-m1-m2-ai-acceleration-module) | 3자, 유통사 |

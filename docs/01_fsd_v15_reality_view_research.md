@@ -2,7 +2,7 @@
 
 이 문서는 테슬라 FSD v15에 들어간 리얼리티 뷰(Reality View)가 어떤 과정을 거쳐 화면을 만드는지, 어떤 모델과 칩과 카메라를 쓰는지 정리한 조사 자료입니다. 라즈베리파이에 NPU(Hailo, DEEPX 등)를 붙여 비슷한 기능을 만들 때 기준으로 삼으려고 작성했습니다.
 
-작성일은 2026-11-24입니다. FSD v15는 2026-11-21에 배포를 시작했기 때문에 테슬라가 공개한 기술 정보가 아직 적고, 여기 적힌 숫자는 앞으로 바뀔 수 있습니다.
+FSD v15는 2026-11-21에 배포를 시작했기 때문에 테슬라가 공개한 기술 정보가 아직 적고, 여기 적힌 숫자는 앞으로 바뀔 수 있습니다.
 
 ## 수치의 구분
 
@@ -42,8 +42,6 @@
 
 운전자는 FSD가 무엇을 하려는지 화면에서 보고 조작할 수 있습니다. 화면은 전체 화면 시각화, 지도, 분할 화면 중에서 고르고 quiet mode도 선택할 수 있습니다. 다가오는 회전 안내는 시각화 화면 안에 바로 표시됩니다. [S3][S6]
 
-일부 매체는 같은 항목을 "Tesla Augmented Reality"로 인용했습니다. 테슬라의 X 공지는 "Tesla Reality View"라는 이름을 씁니다. [S2][S6]
-
 아쇽 엘루스와미는 2026-11-21에 X에서 다음과 같이 설명했습니다. [S4]
 
 - 이 화면은 차량을 제어하는 것과 같은 엔드투엔드 주행 모델이 만들며, 주변 세계를 사실적으로 그립니다.
@@ -70,8 +68,6 @@ Not a Tesla App은 이 화면이 탐지 결과를 그린 것이 아니고 카메
 | 약 1B 렌더러가 3B 행동 모델과 UVE를 공유 | 행동 모델이 3B라는 수치는 출처가 없습니다. | 추정 [S1][S6] |
 | 가우시안 스플래팅 | 블로그의 추측입니다. 테슬라는 기법 이름을 밝히지 않았습니다. | 추정 [S10] |
 | 언리얼 엔진 | 티저 때 나온 기자의 추측이며, 게임 엔진을 쓰지 않는다는 머스크의 말과 맞지 않습니다. | 추정 [S6] |
-
-한 유튜버(vogel)는 테슬라 카메라 6대의 대시캠 영상 약 13분으로 가우시안 스플랫 장면을 다시 만들었습니다. 이때 카메라 사이의 시간 차이가 최대 8.7ms로 측정됐습니다. 테슬라가 밝힌 정보는 아니지만 여러 카메라를 맞출 때 참고할 수 있습니다. (3자 [S1])
 
 ## 3. 카메라에서 화면까지의 처리 과정
 
@@ -117,8 +113,6 @@ v15는 BEV나 점유 같은 중간 결과를 그리지 않고, 인코더가 만�
 | 뉴럴 월드 시뮬레이터 | 주행 동작을 조건으로 여러 카메라 영상을 생성합니다. 평가, 강화학습, 합성 데이터에 씁니다. | 대형 모델, 세부 미공개 | 데이터 센터 | 공식 [S6], 3자 [S11] |
 | FSD v14 Lite | HW3용으로 줄인(증류한) 모델입니다. | 미공개 | HW3 | 3자 [S8][S9] |
 
-KuCoin(CoinDesk 전재) 기사는 "1B에서 10B"를 리얼리티 뷰와 같은 맥락에서 썼습니다. 이 수치는 주행 모델에 대한 것이고, 리얼리티 뷰 렌더러는 약 1B로 보도됐습니다. [S1][S5]
-
 ## 5. 차량 컴퓨터의 구조와 성능
 
 ### 5.1 세대별 비교
@@ -146,13 +140,10 @@ KuCoin(CoinDesk 전재) 기사는 "1B에서 10B"를 리얼리티 뷰와 같은 �
 | HW3 | v14 Lite(v14.3 Lite)에 머뭅니다. | 줄인 v14 주행 모델 | 지원하지 않습니다. | 공식, 머스크 인용 [S8], 3자 [S3][S9] |
 | HW4 / AI4 | v15 | UVE, 약 10B 주행 모델, 약 1B 리얼리티 뷰 렌더러 | 지원합니다. 칩 2개 중 한 칩에서 TRIP 3개 가운데 절반 1개 분량을 씁니다. | 공식 [S1][S5][S8] |
 | AI5 | 해당 없음 | 머스크는 AI5가 옵티머스에 들어가고 차량은 AI4에 머문다고 했습니다. 초인적 주행에는 AI4로 충분하다는 설명입니다. | 성능이 좋아질 것이라는 언급만 있습니다. | 공식 [S6], 3자 [S1] |
-| 로보택시 | v15 초기 빌드(정해진 구역 안에서 감독 없이 운행) | 확인 필요 | 확인 필요 | 3자 [S7][S8] |
 
 아래는 이 문서의 해석입니다. 리얼리티 뷰가 TRIP 3개 중 0.5개, 곧 한 칩 NPU의 약 6분의 1만 쓴다면, AI4 한 칩의 TOPS를 매체 추정치의 중간쯤으로 잡아도 수십 TOPS 수준입니다. Hailo-8(26 TOPS)이나 DEEPX DX-M1(25 TOPS)과 자릿수가 같습니다. 그러나 AI4에는 GDDR6의 넓은 대역폭과 큰 메모리가 있어서 1B 파라미터 생성 모델을 돌리는 조건은 엣지 NPU와 많이 다릅니다. 자세한 비교는 [엣지 NPU 사양 비교](02_edge_npu_spec_comparison.md)에 있습니다.
 
 ## 6. 카메라
-
-### 6.1 HW3와 HW4
 
 | 항목 | HW3 | HW4 (AI4) | 구분 |
 |---|---|---|---|
@@ -169,10 +160,6 @@ KuCoin(CoinDesk 전재) 기사는 "1B에서 10B"를 리얼리티 뷰와 같은 �
 | 카메라별 화각과 거리 | 확인 필요 | 후방 카메라의 화각이 더 넓습니다(어안에 가까움). 나머지는 확인 필요입니다. | 3자 [S21] |
 | 다음 세대 | 해당 없음 | 펌웨어에서 "IMX00N"이라는 이름이 발견됐습니다. 사양은 공개되지 않았고 양산 차량 적용 여부는 확인 필요입니다. | 3자 [S18][S20] |
 
-### 6.2 레이더
-
-테슬라는 모델 3와 Y에서 2021년 5월부터, 모델 S와 X에서 2022년 2월부터 전방 레이더를 뺐습니다. 사이버트럭과 일부 HW4 모델 S, X에는 2023년 말부터 HD 이미징 레이더가 들어갔습니다. FSD가 이 레이더를 쓰는지는 확인 필요입니다. (3자 [S15])
-
 ## 7. 엣지 NPU로 만들 때 생각할 점
 
 이 장은 이 문서의 해석이며 수치는 따로 검증해야 합니다.
@@ -185,7 +172,7 @@ KuCoin(CoinDesk 전재) 기사는 "1B에서 10B"를 리얼리티 뷰와 같은 �
 2. 카메라 영상을 3D 형상에 입혀서 그립니다. 생성 모델 없이도 리얼리티 뷰와 비슷한 느낌을 낼 수 있습니다.
 3. 낮은 해상도의 잠재 공간에서 작은 생성 모델(수천만 파라미터 규모, 적은 단계로 생성하는 consistency 또는 mean-flow 계열)로 시점을 바꿉니다. 테슬라의 구조를 작게 줄여 따라 하는 단계입니다.
 
-테슬라처럼 인코더 하나를 주행과 시각화가 함께 쓰게 하고, 생성 작업을 인코더 18Hz, 출력 36fps처럼 낮은 주기로 여러 사이클에 나누면 엣지 장치에서도 유리합니다. 3D로 재구성하려면 카메라 사이의 시간 차이를 수 ms 안으로 관리해야 합니다. 테슬라 대시캠에서는 최대 8.7ms가 측정됐습니다. [S1]
+테슬라처럼 인코더 하나를 주행과 시각화가 함께 쓰게 하고, 생성 작업을 인코더 18Hz, 출력 36fps처럼 낮은 주기로 여러 사이클에 나누면 엣지 장치에서도 유리합니다. 3D로 재구성하려면 카메라 사이의 시간 차이를 수 ms 안으로 관리해야 합니다. 테슬라 대시캠 영상에서는 카메라 사이의 시간 차이가 최대 8.7ms로 측정된 적이 있습니다. (3자 [S1])
 
 ## 8. 확인이 필요한 항목
 
@@ -197,26 +184,26 @@ KuCoin(CoinDesk 전재) 기사는 "1B에서 10B"를 리얼리티 뷰와 같은 �
 
 ## 9. 출처 목록
 
-| 번호 | 출처 | 날짜 |
-|---|---|---|
-| S1 | [How Tesla's FSD V15 Reality View Actually Works, Not a Tesla App](https://www.notateslaapp.com/news/5068/how-teslas-fsd-v15-reality-view-actually-works-video) | 2026-11 |
-| S2 | [Tesla launches FSD v15, Electrek](https://electrek.co/2026/11/21/tesla-fsd-v15-rollout-25x-safety-reality-view/) | 2026-11-21 |
-| S3 | [Tesla FSD v15 (2026.38.6.11): Rollout Begins, Official Release Notes, Tesla Oracle](https://www.teslaoracle.com/2026/11/22/tesla-fsd-v15-2026-38-6-11-rollout-begins-official-release-notes-and-new-features/) | 2026-11-22 |
-| S4 | [Tesla Reality View takes FSD visualizations to an entirely new level, Drive Tesla Canada](https://driveteslacanada.ca/news/tesla-reality-view/) | 2026-11 |
-| S5 | [Tesla FSD v15 uses half of the AI4 chip's TRIP accelerator for real-time AI video, KuCoin News(CoinDesk 전재)](https://www.kucoin.com/news/flash/tesla-fsd-v15-uses-half-of-ai4-chip-s-trip-accelerator-for-real-time-ai-video) | 2026-11 |
-| S6 | [Tesla FSD v15's 'Reality View' has one complaint and Musk has the solution, Teslarati](https://www.teslarati.com/tesla-fsd-v15s-reality-drive-one-complaint-musk-solution/) | 2026-11 |
-| S7 | [Tesla FSD v15 to go wide release with the 2026 Holiday Update, Tesla Oracle](https://www.teslaoracle.com/2026/11/21/tesla-fsd-v15-to-go-wide-release-with-the-2026-holiday-update-and-mind-bending-reality-renders-in-december-says-musk/) | 2026-11-21 |
-| S8 | [Tesla starts FSD v15 rollout to early testers and leaves HW3 cars out, Startup Fortune](https://startupfortune.com/tesla-starts-fsd-v15-rollout-to-early-testers-and-leaves-hw3-cars-out/) | 2026-11-22 |
-| S9 | [Tesla VP Talks About What's Coming in FSD V15, Not a Tesla App](https://www.notateslaapp.com/news/4679/tesla-ai-chief-talks-about-whats-coming-in-fsd-v15) | 2026-09-11 |
-| S10 | [Gaussian Splatting explained: the tech likely behind Tesla's Reality View, astig.ph](https://astig.ph/gaussian-splatting-explained-tesla-reality-view/) | 2026-11 |
-| S11 | [Tesla ICCV 2025 Foundational Model for FSD 요약, Bradford Ferguson (Thread Reader)](https://threadreaderapp.com/thread/1982161471644545387) | 2025-10-25 |
-| S12 | [Tesla Unveils "World Simulator", Tiger Brokers / Deep News](https://www.itiger.com/news/1146546403) | 2025-10-27 |
-| S13 | [FSD Chip, WikiChip](https://en.wikichip.org/wiki/FSD_Chip) (테슬라 2019 Autonomy Day, Hot Chips 31 자료 정리) | 날짜 없음 |
-| S14 | [Tesla's HW4, Behind the Chip (Gidion)](https://behindthechip.substack.com/p/teslas-hw4) | 2026-08-19 |
-| S15 | [Tesla FSD Hardware: HW1 to HW5, TeslAnt](https://teslant.com/en/guides/tesla-fsd-hardware-generations-reference-2026) | 2026-06-23 |
-| S16 | [Tesla AI5 Chip: Specs, Manufacturer, AI4 vs AI5, AutoAkhbar](https://autoakhbar.com/tesla-ai5-chip-specifications-manufacturer-vs-ai4/) | 2026-04-18 |
-| S17 | [How Tesla's FSD Hardware Has Changed Over the Years, Not a Tesla App](https://www.notateslaapp.com/news/3521/how-teslas-fsd-hardware-has-changed-over-the-years) | 2026-05-27 |
-| S18 | [Tesla new camera upgrade, Electrek](https://electrek.co/2025/12/02/tesla-new-camera-upgrade-casting-more-doubt-full-self-driving-promises/) (green의 펌웨어 분석 인용) | 2025-12-02 |
-| S19 | [Tesla Hardware 4 rolling out to new vehicles, AutoPilot Review](https://www.autopilotreview.com/tesla-hardware-4-rolling-out-to-new-vehicles/) | 2026-11 |
-| S20 | [Tesla Preparing Upgraded Exterior Cameras as New IMX00N Code Appears, Drive Tesla Canada](https://driveteslacanada.ca/news/tesla-preparing-upgraded-exterior-cameras-as-new-imx00n-code-appears-in-firmware/) | 2025-12-02 |
-| S21 | [Tesla's HW3 and HW4 Cameras: Comparing the Differences, Not a Tesla App](https://www.notateslaapp.com/news/1564/teslas-hw3-and-hw4-cameras-comparing-the-differences-in-quality-and-hardware) | 2023-09-02 |
+| 번호 | 출처 |
+|---|---|
+| S1 | [How Tesla's FSD V15 Reality View Actually Works, Not a Tesla App](https://www.notateslaapp.com/news/5068/how-teslas-fsd-v15-reality-view-actually-works-video) |
+| S2 | [Tesla launches FSD v15, Electrek](https://electrek.co/2026/11/21/tesla-fsd-v15-rollout-25x-safety-reality-view/) |
+| S3 | [Tesla FSD v15 (2026.38.6.11): Rollout Begins, Official Release Notes, Tesla Oracle](https://www.teslaoracle.com/2026/11/22/tesla-fsd-v15-2026-38-6-11-rollout-begins-official-release-notes-and-new-features/) |
+| S4 | [Tesla Reality View takes FSD visualizations to an entirely new level, Drive Tesla Canada](https://driveteslacanada.ca/news/tesla-reality-view/) |
+| S5 | [Tesla FSD v15 uses half of the AI4 chip's TRIP accelerator for real-time AI video, KuCoin News(CoinDesk 전재)](https://www.kucoin.com/news/flash/tesla-fsd-v15-uses-half-of-ai4-chip-s-trip-accelerator-for-real-time-ai-video) |
+| S6 | [Tesla FSD v15's 'Reality View' has one complaint and Musk has the solution, Teslarati](https://www.teslarati.com/tesla-fsd-v15s-reality-drive-one-complaint-musk-solution/) |
+| S7 | [Tesla FSD v15 to go wide release with the 2026 Holiday Update, Tesla Oracle](https://www.teslaoracle.com/2026/11/21/tesla-fsd-v15-to-go-wide-release-with-the-2026-holiday-update-and-mind-bending-reality-renders-in-december-says-musk/) |
+| S8 | [Tesla starts FSD v15 rollout to early testers and leaves HW3 cars out, Startup Fortune](https://startupfortune.com/tesla-starts-fsd-v15-rollout-to-early-testers-and-leaves-hw3-cars-out/) |
+| S9 | [Tesla VP Talks About What's Coming in FSD V15, Not a Tesla App](https://www.notateslaapp.com/news/4679/tesla-ai-chief-talks-about-whats-coming-in-fsd-v15) |
+| S10 | [Gaussian Splatting explained: the tech likely behind Tesla's Reality View, astig.ph](https://astig.ph/gaussian-splatting-explained-tesla-reality-view/) |
+| S11 | [Tesla ICCV 2025 Foundational Model for FSD 요약, Bradford Ferguson (Thread Reader)](https://threadreaderapp.com/thread/1982161471644545387) |
+| S12 | [Tesla Unveils "World Simulator", Tiger Brokers / Deep News](https://www.itiger.com/news/1146546403) |
+| S13 | [FSD Chip, WikiChip](https://en.wikichip.org/wiki/FSD_Chip) (테슬라 2019 Autonomy Day, Hot Chips 31 자료 정리) |
+| S14 | [Tesla's HW4, Behind the Chip (Gidion)](https://behindthechip.substack.com/p/teslas-hw4) |
+| S15 | [Tesla FSD Hardware: HW1 to HW5, TeslAnt](https://teslant.com/en/guides/tesla-fsd-hardware-generations-reference-2026) |
+| S16 | [Tesla AI5 Chip: Specs, Manufacturer, AI4 vs AI5, AutoAkhbar](https://autoakhbar.com/tesla-ai5-chip-specifications-manufacturer-vs-ai4/) |
+| S17 | [How Tesla's FSD Hardware Has Changed Over the Years, Not a Tesla App](https://www.notateslaapp.com/news/3521/how-teslas-fsd-hardware-has-changed-over-the-years) |
+| S18 | [Tesla new camera upgrade, Electrek](https://electrek.co/2025/12/02/tesla-new-camera-upgrade-casting-more-doubt-full-self-driving-promises/) (green의 펌웨어 분석 인용) |
+| S19 | [Tesla Hardware 4 rolling out to new vehicles, AutoPilot Review](https://www.autopilotreview.com/tesla-hardware-4-rolling-out-to-new-vehicles/) |
+| S20 | [Tesla Preparing Upgraded Exterior Cameras as New IMX00N Code Appears, Drive Tesla Canada](https://driveteslacanada.ca/news/tesla-preparing-upgraded-exterior-cameras-as-new-imx00n-code-appears-in-firmware/) |
+| S21 | [Tesla's HW3 and HW4 Cameras: Comparing the Differences, Not a Tesla App](https://www.notateslaapp.com/news/1564/teslas-hw3-and-hw4-cameras-comparing-the-differences-in-quality-and-hardware) |

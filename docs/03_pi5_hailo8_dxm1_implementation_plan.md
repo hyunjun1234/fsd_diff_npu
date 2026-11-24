@@ -13,7 +13,7 @@
 | Hailo-8 역할 | 카메라별 객체 검출(YOLOv8s HEF). 기존 데모 코드가 이미 이 구성을 전제로 짜여 있습니다. |
 | DX-M1 역할 | 도로 세그멘테이션과 거리 보정용 깊이 추정. 2단계에서는 FlashOcc의 이미지 백본을 맡습니다. 온보드 메모리가 있어 큰 모델을 올리기 유리합니다. |
 | CPU 역할 | 지면 투영(IPM), 카메라 간 병합과 추적, BEV 변환(BEVPool), 화면 렌더링 |
-| 구현 순서 | 0단계 장비 확인 → 1단계 Hailo 단독 실기 검증 → 2단계 DX-M1 추가 → 3단계 카메라 4대 → 4단계 FlashOcc 분할 실행 → 5단계 자체 데이터 미세조정 |
+| 구현 순서 | 0단계 장비 확인, 1단계 Hailo 단독 실기 검증, 2단계 DX-M1 추가, 3단계 카메라 4대, 4단계 FlashOcc 분할 실행, 5단계 자체 데이터 미세조정 순서입니다. |
 | 생성형 렌더러 | 테슬라 v15 방식(약 1B 생성 모델)은 이 세 장비로는 범위 밖으로 두고, 마지막에 가능성만 따로 시험합니다. 이유는 02 문서 3장에 있습니다. |
 
 ## 2. 하드웨어 구성
@@ -43,7 +43,7 @@ DX-M1은 모듈 종류에 따라 크기와 메모리가 다릅니다. Radxa DX-M
 
 카메라 위치와 각도는 [configs/two_cam.yaml](../configs/two_cam.yaml)과 [configs/four_cam.yaml](../configs/four_cam.yaml)의 값을 출발점으로 씁니다. 차량 좌표는 X가 전방, Y가 좌측이고 원점은 뒷바퀴 축 중앙 바닥입니다. 4대 구성에서 전방은 1.3m 높이에서 12도, 후방은 1.1m 높이에서 15도, 좌우는 사이드미러 위치(1.05m)에서 30도 아래로 숙입니다. 좌우 카메라를 많이 숙이는 이유는 지면 투영 방식에서 차 바로 옆 바닥이 잘 보여야 거리 오차가 줄기 때문입니다. 테슬라는 카메라 7~8대를 쓰며(01 문서 6장), 이 계획의 4대는 그중 전방 와이드, 후방, 좌우 리피터 위치를 대신하는 최소 구성입니다.
 
-쿼드 키트에는 주의할 점이 있습니다. 4대를 켜면 카메라당 해상도가 1152x648로 줄고 프레임레이트가 절반이 됩니다. 또 제품 페이지에 4대 전체가 하드웨어 동기화된다고 적혀 있으면서도, 0번과 1번, 2번과 3번이 각각 동기화되고 2번과 3번이 한 프레임 늦다는 설명이 함께 있습니다 [P7]. 파이5 지원 여부도 페이지에서 명확히 확인하지 못했습니다. 그래서 3단계에서 동기 오차를 직접 재는 것을 완료 조건에 넣었습니다. 카메라당 1152x648은 NPU 입력(640x640 이하)보다 크므로 해상도 자체는 충분합니다.
+쿼드 키트에는 주의할 점이 있습니다. 4대를 켜면 카메라당 해상도가 1152x648로 줄고 프레임레이트가 절반이 됩니다. 또 제품 페이지에 4대 전체가 하드웨어 동기화된다고 적혀 있으면서도, 0번과 1번, 2번과 3번이 각각 동기화되고 2번과 3번이 한 프레임 늦다는 설명이 함께 있습니다 [P7]. 파이5 지원 여부도 확인 필요입니다. 그래서 3단계에서 동기 오차를 직접 재는 것을 완료 조건에 넣었습니다. 카메라당 1152x648은 NPU 입력(640x640 이하)보다 크므로 해상도 자체는 충분합니다.
 
 쿼드 키트가 파이5에서 동작하지 않으면 CSI 2대와 USB 카메라 2대를 섞는 구성으로 바꿉니다. 이 경우 USB 쪽은 하드웨어 동기화가 없으므로, 타임스탬프가 가장 가까운 프레임끼리 묶는 방식으로 처리합니다.
 
@@ -91,8 +91,8 @@ DX-M1용 모델은 Ultralytics에서 바로 만들 수 있습니다. `model.expo
 순서는 아래와 같습니다. 연산자 확인(4.5)은 PC에서 컴파일러만으로 할 수 있으므로 0~3단계와 함께 진행해도 됩니다.
 
 ```
-0단계 장비 확인 ─► 1단계 Hailo 단독 실기 ─► 2단계 DX-M1 추가 ─► 3단계 카메라 4대 ─► 4단계 FlashOcc 분할 실행 ─► 5단계 자체 데이터
-                    (PC에서 병행) 연산자 확인 ──────────────────────────────────────────┘
+0단계 장비 확인 -> 1단계 Hailo 단독 실기 -> 2단계 DX-M1 추가 -> 3단계 카메라 4대 -> 4단계 FlashOcc 분할 실행 -> 5단계 자체 데이터
+                    (PC에서 병행) 연산자 확인 (4단계 전까지)
 ```
 
 ### 4.1 0단계: 장비 연결과 개별 동작 확인 (약 1주)
@@ -160,10 +160,10 @@ nuScenes와 카메라 높이, 화각이 다르면 성능이 크게 떨어지므�
 
 | 번호 | 출처 |
 |---|---|
-| P1 | CNX Software, "PCIe3.0 to Dual M.2 HAT+ for Raspberry Pi 5 features ASMedia ASM2806 PCIe 3.0 switch" (2025-01-21): https://www.cnx-software.com/2025/01/21/pcie3-0-to-dual-m-2-hat-for-raspberry-pi-5-features-asmedia-asm2806-pcie-3-0-switch/ |
+| P1 | CNX Software, "PCIe3.0 to Dual M.2 HAT+ for Raspberry Pi 5 features ASMedia ASM2806 PCIe 3.0 switch": https://www.cnx-software.com/2025/01/21/pcie3-0-to-dual-m-2-hat-for-raspberry-pi-5-features-asmedia-asm2806-pcie-3-0-switch/ |
 | P2 | Seeed Studio Wiki, "Raspberry Pi 5 uses PCIe HAT / dual HAT": https://wiki.seeedstudio.com/raspberry_pi_5_uses_pcie_hat_dual_hat/ |
-| P3 | Hailo Community, "Raspberry Pi PCIe to 4ch PCIe" (2026-03-30): https://community.hailo.ai/t/raspberry-pi-pcie-to-4ch-pcie/19020/3 |
-| P4 | Hailo Community, "Hailo M.2 not detected alongside M.2 SSD on Raspberry Pi5" (2025-09-30): https://community.hailo.ai/t/hailo-m-2-not-detected-alongside-m-2-ssd-on-raspberry-pi5/17759 |
+| P3 | Hailo Community, "Raspberry Pi PCIe to 4ch PCIe": https://community.hailo.ai/t/raspberry-pi-pcie-to-4ch-pcie/19020/3 |
+| P4 | Hailo Community, "Hailo M.2 not detected alongside M.2 SSD on Raspberry Pi5": https://community.hailo.ai/t/hailo-m-2-not-detected-alongside-m-2-ssd-on-raspberry-pi5/17759 |
 | P5 | Radxa Docs, "DX-M1 on Raspberry Pi 5": https://docs.radxa.com/en/aicore/dx-m1/raspberry-pi5 |
 | P6 | Raspberry Pi, Camera Module 3 제품 페이지와 제품 설명서: https://www.raspberrypi.com/products/camera-module-3/ , https://datasheets.raspberrypi.com/camera/camera-module-3-product-brief.pdf |
 | P7 | Arducam, "12MP IMX708 Quad-Camera Kit": https://www.arducam.com/arducam-12mp-imx708-quad-camera-kit-wide-angle-stereo-synchronized-camera-module-for-raspberry-pi.html |
