@@ -106,6 +106,42 @@ def test_usb_source_stamps_monotonic_with_offset_and_resizes():
     assert cap.released
 
 
+def test_usb_source_capture_size_is_requested_from_device_and_resized():
+    cap = FakeCapture(n=2, size=(1280, 720))
+    s = UsbCameraSource(0, 768, 432, fourcc="MJPG", capture_size=(1280, 720), capture_factory=lambda d: cap, threaded=False)
+    f = s.read()
+    # 장치에는 1280x720을 요청하고, 파이프라인에는 768x432로 넘긴다
+    assert cap.props[cv2.CAP_PROP_FRAME_WIDTH] == 1280 and cap.props[cv2.CAP_PROP_FRAME_HEIGHT] == 720
+    assert cap.props[cv2.CAP_PROP_FOURCC] == cv2.VideoWriter_fourcc(*"MJPG")
+    assert f.shape == (432, 768, 3) and not s.ratio_mismatch
+    s.close()
+
+
+def test_usb_source_warns_when_device_ratio_differs(capsys):
+    # 768x432를 요청했는데 장치가 4:3(640x480)으로 내는 경우: 줄이면 영상이 찌그러지므로 알린다
+    cap = FakeCapture(n=2, size=(640, 480))
+    s = UsbCameraSource(0, 768, 432, capture_factory=lambda d: cap, threaded=False)
+    assert s.read().shape == (432, 768, 3)
+    s.read()
+    s.close()
+    err = capsys.readouterr().err
+    assert s.ratio_mismatch and err.count("비율이 달라") == 1  # 첫 영상에서 한 번만
+
+
+def test_open_source_passes_capture_size(monkeypatch):
+    import realityview.multicam as mc
+
+    cap = FakeCapture(n=1, size=(1280, 720))
+    monkeypatch.setattr(mc, "_default_capture", lambda d: cap)
+    cam = [c for c in load_config(os.path.join(ROOT, "configs/five_cam.yaml"))[0] if c.name == "left"][0]
+    s = open_source(cam)
+    try:
+        assert s.capture_size == (1280, 720) and s.size == (768, 432)
+        assert cap.props[cv2.CAP_PROP_FRAME_WIDTH] == 1280
+    finally:
+        s.close()
+
+
 def test_usb_source_thread_gives_each_frame_once_and_ends():
     s = UsbCameraSource("fake.mp4", 64, 48, capture_factory=lambda d: FakeCapture(n=4), pace_fps=200)
     seen, stamps = [], []

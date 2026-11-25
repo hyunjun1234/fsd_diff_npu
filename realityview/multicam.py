@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import os
+import sys
 import threading
 import time
 from collections import deque
@@ -67,6 +68,9 @@ class UsbCameraSource:
     - timestamp_offset_ms: 받은 시각에서 뺄 값(전송 지연 추정치). 기본 0.
     - pace_fps: 동영상 파일을 가짜 카메라로 쓸 때 이 속도보다 빨리 읽지 않는다. 진짜 장치는 장치가 속도를 정한다.
     - loop: 파일 끝에서 처음으로 돌아간다(가짜 카메라용).
+    - capture_size: 장치에 요청할 크기 (가로, 세로). 받은 영상은 read()에서 width x height로 줄인다.
+      UVC 카메라는 정해진 크기만 내므로(예: 1280x720) 파이프라인 크기를 그대로 요청하면 드라이버가
+      비율이 다른 모드(예: 640x480)를 골라 영상이 찌그러질 수 있다. 주지 않으면 width x height를 요청한다.
     - capture_factory: 시험에서 가짜 VideoCapture를 넣는 자리. 기본은 _default_capture.
     - threaded=False: 스레드 없이 read()에서 바로 읽는다(시험용).
     """
@@ -84,9 +88,12 @@ class UsbCameraSource:
         threaded: bool = True,
         wait_s: float = 2.0,
         fourcc: str | None = None,
+        capture_size: tuple[int, int] | None = None,
     ):
         self.device = device
         self.size = (int(width), int(height))
+        self.capture_size = (int(capture_size[0]), int(capture_size[1])) if capture_size else self.size
+        self.ratio_mismatch = False  # 받은 영상의 가로세로 비율이 파이프라인 크기와 다르면 True
         self.offset_ns = int(round(float(timestamp_offset_ms) * 1e6))
         self.pace = float(pace_fps) if pace_fps else None
         self.loop = bool(loop)
@@ -104,8 +111,8 @@ class UsbCameraSource:
             # 해상도와 속도를 장치에 요청한다. 장치가 지원하지 않는 값이면 가까운 값으로 바뀐다
             if fourcc:
                 self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc))
-            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.size[0])
-            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.size[1])
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.capture_size[0])
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.capture_size[1])
             if fps:
                 self.cap.set(cv2.CAP_PROP_FPS, float(fps))
             # 드라이버 버퍼를 줄여 묵은 프레임을 덜 받는다(지원하지 않는 장치는 무시)
@@ -136,8 +143,23 @@ class UsbCameraSource:
         if not ok or f is None:
             return None
         ts = time.monotonic_ns() - self.offset_ns
+        if self.frames_read == 0:
+            self._check_ratio(f)
         self.frames_read += 1
         return f, ts
+
+    def _check_ratio(self, f: np.ndarray) -> None:
+        """첫 영상의 비율이 파이프라인 크기와 2% 넘게 다르면 한 번 알린다(줄이면서 찌그러져 내부 파라미터가 틀어진다)."""
+        got = f.shape[1] / f.shape[0]
+        want = self.size[0] / self.size[1]
+        if abs(got / want - 1.0) > 0.02:
+            self.ratio_mismatch = True
+            print(
+                f"경고: USB 카메라 {self.device}가 {f.shape[1]}x{f.shape[0]}로 들어옵니다. "
+                f"설정 크기 {self.size[0]}x{self.size[1]}와 비율이 달라 영상이 찌그러집니다. "
+                "source에 capture: [가로, 세로]로 같은 비율의 크기를 적으세요.",
+                file=sys.stderr,
+            )
 
     def _run(self) -> None:
         seq = 0

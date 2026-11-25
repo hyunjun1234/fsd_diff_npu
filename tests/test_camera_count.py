@@ -286,3 +286,25 @@ def test_cli_run_and_report(tmp_path):
     assert data["layouts"]["c2_now"]["n"] == 2
     rep = subprocess.run([sys.executable, script, "report", "--in", str(out)], capture_output=True, text=True, timeout=60)
     assert rep.returncode == 0 and "c2_now" in rep.stdout
+
+
+# ---------------------------------------------------------------------------
+# 차량용 설정 파일이 시뮬레이션에서 고른 배치와 같은지
+# ---------------------------------------------------------------------------
+def test_five_cam_config_matches_simulated_layout():
+    """configs/five_cam.yaml의 카메라 5대가 배치 c5_side160과 같은 자리, 방향, 렌즈를 쓴다."""
+    from realityview.config import load_config
+
+    cams, grid, _ = load_config(os.path.join(ROOT, "configs", "five_cam.yaml"))
+    sim = ls.make_layouts()["c5_side160"].cameras()
+    assert [c.name for c in cams] == [c.name for c in sim]
+    for c, r in zip(cams, sim):
+        assert (c.width, c.height, c.model) == (r.width, r.height, r.model)
+        assert np.allclose(c.K, r.K, atol=0.06)  # 설정 파일은 초점거리를 소수 첫째 자리까지 적는다
+        assert np.allclose(c.position, r.position) and c.yaw_deg == r.yaw_deg and c.pitch_deg == r.pitch_deg
+        assert c.max_fov_deg == r.max_fov_deg
+        assert c.source["type"] == r.source["type"]
+    assert (grid.x_min, grid.x_max, grid.y_min, grid.y_max) == (-15.0, 25.0, -12.0, 12.0)
+    # USB 3대는 16:9 크기로 받아야 한다(받는 크기를 적지 않으면 드라이버가 4:3 모드를 고를 수 있다)
+    usb = [c for c in cams if c.source["type"] == "usb"]
+    assert len(usb) == 3 and all(c.source["capture"] == [1280, 720] and c.source["fourcc"] == "MJPG" for c in usb)

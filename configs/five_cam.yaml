@@ -1,0 +1,61 @@
+# 차량용 5대 구성: 전방 광각, 전방 메인(CSI 2대), 후방과 좌우(USB 3대, Arducam IMX291 160도)
+# 대수와 좌우 카메라 자리, 렌즈를 정한 근거는 docs/measurements/19_camera_count_sim.md에 있다.
+# 좌표계: 차량 X 전방, Y 좌측, Z 위 (m). 원점은 뒷바퀴 축 중앙 바닥(docs/04_tesla_camera_layout.md와 같음).
+#
+# 값은 모두 보정 전 근사값이다. intrinsics는 scripts/calib_intrinsics.py, extrinsics는 scripts/calib_extrinsics.py
+# 결과로 바꾼다. 자리는 테슬라 모델 Y 기준 추정치(04 문서)라 실제 차에서 다시 잰다.
+#   전방 2대: 앞유리 상단. 광각은 가까운 곳과 옆, 메인은 25m 너머를 맡는다.
+#   후방: 뒷번호판 위. 좌우: B필러 높이에서 정측면(yaw +-90)을 보고 20도 숙인다.
+# USB 카메라(IMX291 160도)는 제조사가 대각 화각 160도만 적어 두어, 등거리 어안(r = f x theta, 왜곡 0)으로 보고
+# f = 대각 반지름 440.6px / (80도 = 1.3963rad) = 315.5px로 두었다(수평 약 139도). 실제 값은 보정으로 확인 필요.
+# USB 카메라는 1280x720 MJPG로 받아(capture) 768x432로 줄인다. 1920x1080은 해제 시간이 두 배이고, 크기를 적지 않으면
+# 드라이버가 비율이 다른 640x480을 고를 수 있다. 장치 경로는 ls /dev/v4l/by-id/ 로 찾아 바꾼다.
+bev:
+  x_min: -15.0
+  x_max: 25.0
+  y_min: -12.0
+  y_max: 12.0
+  res: 0.05
+
+cameras:
+  - name: front
+    width: 768
+    height: 432
+    intrinsics: {model: pinhole, fx: 311.0, fy: 311.0, cx: 384.0, cy: 216.0, dist: [0.0, 0.0, 0.0, 0.0]}   # Camera Module 3 Wide, 수평 102도
+    extrinsics: {position: [1.80, -0.06, 1.45], yaw: 0.0, pitch: 3.0, roll: 0.0}
+    source: {type: picamera2, index: 0}
+
+  - name: front_main
+    width: 768
+    height: 432
+    intrinsics: {model: pinhole, fx: 564.3, fy: 564.3, cx: 384.0, cy: 216.0, dist: [0.0, 0.0, 0.0, 0.0]}   # Camera Module 3, 수평 68.5도
+    extrinsics: {position: [1.80, 0.00, 1.45], yaw: 0.0, pitch: 3.0, roll: 0.0}
+    source: {type: picamera2, index: 1}
+
+  - name: rear
+    width: 768
+    height: 432
+    intrinsics: {model: fisheye, fx: 315.5, fy: 315.5, cx: 384.0, cy: 216.0, dist: [0.0, 0.0, 0.0, 0.0], max_fov_deg: 160.0}
+    extrinsics: {position: [-0.95, 0.00, 1.00], yaw: 180.0, pitch: 20.0, roll: 0.0}
+    source: {type: usb, device: /dev/v4l/by-id/usb-REAR-video-index0, fps: 30, fourcc: MJPG, capture: [1280, 720], timestamp_offset_ms: 0}
+
+  - name: left
+    width: 768
+    height: 432
+    intrinsics: {model: fisheye, fx: 315.5, fy: 315.5, cx: 384.0, cy: 216.0, dist: [0.0, 0.0, 0.0, 0.0], max_fov_deg: 160.0}
+    extrinsics: {position: [1.20, 0.93, 1.15], yaw: 90.0, pitch: 20.0, roll: 0.0}
+    source: {type: usb, device: /dev/v4l/by-id/usb-LEFT-video-index0, fps: 30, fourcc: MJPG, capture: [1280, 720], timestamp_offset_ms: 0}
+
+  - name: right
+    width: 768
+    height: 432
+    intrinsics: {model: fisheye, fx: 315.5, fy: 315.5, cx: 384.0, cy: 216.0, dist: [0.0, 0.0, 0.0, 0.0], max_fov_deg: 160.0}
+    extrinsics: {position: [1.20, -0.93, 1.15], yaw: -90.0, pitch: 20.0, roll: 0.0}
+    source: {type: usb, device: /dev/v4l/by-id/usb-RIGHT-video-index0, fps: 30, fourcc: MJPG, capture: [1280, 720], timestamp_offset_ms: 0}
+
+npu:
+  det_hef: models/yolov8s_h8.hef
+  seg_hef: null
+  road_classes: [0]
+  score_thr: 0.4
+  seg_every: 3

@@ -272,7 +272,8 @@ def open_source(cam: Camera, override: dict | None = None, hubs: dict | None = N
       picamera2 : CSI 카메라(Picamera2)
       opencv    : 예전 방식 OpenCV 입력(장치 번호나 파일). 시각을 붙이지 않는다
       usb       : USB UVC 카메라(realityview/multicam.py UsbCameraSource). device는 번호나
-                  /dev/v4l/by-id/... 경로. 받은 시각을 time.monotonic_ns()로 붙인다
+                  /dev/v4l/by-id/... 경로. 받은 시각을 time.monotonic_ns()로 붙인다.
+                  capture: [가로, 세로]를 적으면 그 크기로 받아 설정 크기로 줄인다
       video     : 동영상 파일을 가짜 USB 카메라로(uri, fps 속도로 내보내고 끝나면 처음부터)
       quad      : 쿼드 키트 칸 하나(group, tile, lag_frames, inner). 같은 group의 카메라는 hubs로 장치를 나눠 쓴다
     """
@@ -291,6 +292,7 @@ def open_source(cam: Camera, override: dict | None = None, hubs: dict | None = N
                 fps=src.get("fps"),
                 timestamp_offset_ms=float(src.get("timestamp_offset_ms", 0.0)),
                 fourcc=src.get("fourcc"),
+                capture_size=src.get("capture"),
             )
         return UsbCameraSource(
             src["uri"], cam.width, cam.height, pace_fps=float(src.get("fps", 15)), loop=bool(src.get("loop", True)),
