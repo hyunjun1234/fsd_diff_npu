@@ -103,6 +103,7 @@ cd ~/Desktop/App/fsd_diff_npu && python ~/Desktop/App/fsd_agent.py --task-file d
 8. 데스크탑 WSL2에 학습 환경을 설치하고 `python3 -m pytest -q training`이 통과하는지 확인. 그다음 Grounding DINO와 SAM 2 설치, 지금 쓰는 YOLOv8s를 다시 변환해 파이 결과와 같은지 확인.
 9. Hailo DFC와 DX-COM 컴파일, FlashOcc 학습이 필요해지면 x86 리눅스 GPU 서버 연결.
 10. 5대 구성 카메라 구매(제품과 판매처는 [06 문서](06_pi5_camera_selection.md)). 받으면 USB 카메라 3대를 포트마다 하나씩 꽂아 `lsusb -t`와 `dmesg`로 대역 문제가 없는지, 5V 5A 전원에서 전류가 모자라지 않은지 봅니다. 좌우 카메라의 수평 화각은 실제로 쓸 해상도(1280x720)에서 내부 보정으로 잽니다(130도 이상이어야 함). 이어서 사람이 좌우 카메라 화면 가장자리를 걷는 영상과 앞범퍼 바로 앞에 선 영상을 녹화해 두면, 이 결정이 기대는 두 가정(어안 가장자리 검출, 보닛에 가려진 사람 검출)을 확인할 수 있습니다.
+11. 차량 장착 준비물 구매(목록과 판매처는 [07 문서](07_vehicle_mount_and_training_plan.md) 12장). 쐐기, 브래킷, 케이스 같은 3D 출력 부품은 실제 차에서 앞유리와 2열 옆유리의 기울기를 잰 뒤 맡깁니다.
 
 ## 알려진 문제
 
