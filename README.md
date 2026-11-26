@@ -11,6 +11,9 @@
 - [차량 장착과 학습 순환 계획](docs/07_vehicle_mount_and_training_plan.md): 타공 없는 카메라 부착, 배선과 전원과 발열, 국내 법규, 테슬라의 학습 방식, 자동 라벨링, 추가 학습과 NPU 재배포 순환
 - [엣지 NPU 구성과 모델 선정](docs/edge_npu_model_selection.md): 연산자 지원, BEV 모델 방식 비교, 단계별 계획
 - [리얼리티 뷰 1단계 데모](docs/phase1_demo.md): 데모 코드의 구조, 설치와 실행, 카메라 보정
+- [v15풍 화면](docs/v15_render.md): 3D 차량 모델, 그림자, 경로 띠, 시점 전환으로 v15 리얼리티 뷰를 닮게 그리는 화면과 자차 모델 교체 방법
 - [라즈베리파이 5, Hailo-8, DX-M1 구현 계획](docs/03_pi5_hailo8_dxm1_implementation_plan.md): 두 NPU 연결 방법, 카메라 수와 배치, NPU별 모델 배치, 단계별 구현 순서와 완료 기준
 - [진행 상황](docs/progress.md): 지금 단계, 측정값, 다음에 할 일, 사용자가 할 일, 크레딧 기록
 - [Claude API 크레딧 사용 계획](docs/05_claude_api_credit_plan.md): 크레딧을 쓸 작업, 작업별 모델과 비용, 200달러 예산안, Console 설정과 호출 예시
+
+자차 3D 모델은 Doz3의 "Kia Carnival 2011"(CC-BY-4.0)을 바꿔 쓴 것이고, 출처 표기는 [assets/vehicles/README.md](assets/vehicles/README.md)에 있습니다.

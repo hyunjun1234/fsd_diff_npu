@@ -150,10 +150,15 @@ def build_parser() -> argparse.ArgumentParser:
     # ---- 화면 종류(기본 bev = 예전과 같은 탑뷰 대시보드) ----
     ap.add_argument(
         "--view",
-        choices=["bev", "3d", "both"],
+        choices=["bev", "3d", "both", "v15"],
         default="bev",
-        help="bev: 탑뷰(기본), 3d: 자차 뒤쪽 위 3D 시점을 크게, both: 탑뷰 + 3D 시점",
+        help="bev: 탑뷰(기본), 3d: 자차 뒤쪽 위 3D 시점을 크게, both: 탑뷰 + 3D 시점, "
+             "v15: FSD v15 리얼리티 뷰를 닮은 화면(3D 차량 모델, 그림자, 경로 띠, 시점 전환)",
     )
+    ap.add_argument("--v15-view", default="chase", help="v15 처음 시점: chase, high, rear, side, top, orbit. 창에서 1~6 키로 바꿈")
+    ap.add_argument("--v15-tour", type=float, default=0.0, help="0보다 크면 이 간격(초)으로 v15 시점을 차례로 돌림(시연용)")
+    ap.add_argument("--v15-ego-model", default=None, help="자차 모델 npz(scripts/convert_vehicle_model.py로 만든 것)")
+    ap.add_argument("--v15-paint", default=None, help="자차 도장 색 R,G,B로 덮어쓰기. 예: 245,245,245")
     ap.add_argument("--view3d-size", default=None, help="3D 화면 크기 폭x높이. 기본 960x540(설정 view3d 항목이 있으면 그 값)")
     ap.add_argument("--view3d-scale", type=float, default=None, help="3D를 이 비율로 작게 그린 뒤 키움(0.1~1). 예: 0.5")
     ap.add_argument("--view3d-ground-every", type=int, default=1, help="3D 바닥 텍스처를 N 프레임마다 다시 만듦. 기본 1")
@@ -282,8 +287,31 @@ def sim_error_cameras(cams, specs: list[str]):
     return out
 
 
+def make_v15_config(args, cfg: dict):
+    """v15풍 화면 설정. 설정 파일의 v15 항목(있으면)을 바탕으로 명령줄 옵션을 덮어쓴다."""
+    from realityview.render_v15 import V15Config
+
+    base = dict(cfg.get("v15") or {})
+    if args.view3d_size:
+        w, h = args.view3d_size.lower().split("x")
+        base["width"], base["height"] = int(w), int(h)
+    if args.view3d_scale is not None:
+        base["render_scale"] = float(args.view3d_scale)
+    base["view"] = args.v15_view
+    if args.v15_tour:
+        base["tour_s"] = float(args.v15_tour)
+    if args.v15_ego_model:
+        base["ego_model"] = args.v15_ego_model
+    if args.v15_paint:
+        r, g, b = (int(v) for v in args.v15_paint.split(","))
+        base["ego_paint"] = (b, g, r)
+    return V15Config(**base).checked()
+
+
 def make_view3d_config(args, cfg: dict):
     """3D 시점 설정. 설정 파일의 view3d 항목(있으면)을 바탕으로 명령줄 옵션을 덮어쓴다."""
+    if args.view == "v15":
+        return make_v15_config(args, cfg)
     from realityview.render3d import View3DConfig
 
     base = dict(cfg.get("view3d") or {})
@@ -634,6 +662,8 @@ def main() -> None:
         traffic_lights=TrafficLightConfig() if args.traffic_lights else None,
         calib_monitor=make_calib_monitor_config(args),
     )
+    if args.backend == "sim":
+        pipe.ego_speed = world.ego_speed  # 시뮬레이션은 자차 속도를 안다(실차는 CAN이나 GPS 연결 전까지 모름)
     if args.skew_comp and not args.sync:
         print("--skew-comp 는 --sync 와 같이 써야 동작합니다(지금은 꺼진 것과 같음)", flush=True)
 
@@ -815,8 +845,11 @@ def main() -> None:
                 writer.write(out.dashboard)
             if not args.headless:
                 cv2.imshow("reality view", out.dashboard)
-                if cv2.waitKey(1) & 0xFF in (27, ord("q")):
+                key = cv2.waitKey(1) & 0xFF
+                if key in (27, ord("q")):
                     break
+                if args.view == "v15":
+                    pipe.r3d.handle_key(key)  # 1~6: 시점 바꾸기
             if n % 30 == 0:
                 t = out.timings
                 print(

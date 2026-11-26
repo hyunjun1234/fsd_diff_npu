@@ -5,6 +5,7 @@ import threading
 import time
 from dataclasses import dataclass
 
+import cv2
 import numpy as np
 
 from .bev import BevGrid, IpmCompositor, merge_cross_camera, project_detections
@@ -14,6 +15,7 @@ from .lanes import LaneConfig, LaneCurve, LaneDetector, LaneSmoother, box_masks,
 from .profiling import StageTimer
 from .render import annotate_camera, compose_dashboard, compose_dashboard_3d, render_bev
 from .render3d import Renderer3D, View3DConfig
+from .render_v15 import RendererV15, V15Config, stretch_mask
 from .tracker import BevTracker, Track
 from .traffic_lights import AERIAL_LABELS, TrafficLight, TrafficLightConfig, TrafficLightReader
 from .types import FrameResult
@@ -57,6 +59,7 @@ class _RenderJob:
     refresh_ground: bool = True  # 3D 바닥을 이번에 다시 만들지(ground_every 프레임마다)
     lanes: list[LaneCurve] | None = None
     lights: list[TrafficLight] | None = None
+    obj_mask: np.ndarray | None = None  # v15 화면: 검출 상자가 바닥에 늘어진 셀(바닥 영상에서 지운다)
 
 
 def _snapshot_tracks(tracks: list[Track]) -> list[Track]:
@@ -231,6 +234,11 @@ class _SegWorker:
 # ---------------------------------------------------------------------------
 # 파이프라인
 # ---------------------------------------------------------------------------
+def as_u8(m: np.ndarray) -> np.ndarray:
+    m = np.asarray(m)
+    return m if m.dtype == np.uint8 and m.ndim == 2 else (m.reshape(m.shape[:2]) != 0).astype(np.uint8)
+
+
 class RealityViewPipeline:
     def __init__(
         self,
@@ -266,13 +274,20 @@ class RealityViewPipeline:
         self.show_ground = show_ground
         self.show_cameras = show_cameras
         self.timer = timer or StageTimer(enabled=False)
-        if view not in ("bev", "3d", "both"):
-            raise ValueError(f"view는 bev, 3d, both 중 하나여야 합니다: {view}")
+        if view not in ("bev", "3d", "both", "v15"):
+            raise ValueError(f"view는 bev, 3d, both, v15 중 하나여야 합니다: {view}")
         self.view = view
         self.ground_every = max(1, int(ground_every))
         # 3D 렌더러는 트랙 보간 상태와 바닥 캐시를 들고 있어서 렌더링을 하는 쪽(같은 스레드 또는 렌더링 스레드) 하나만 쓴다
-        self.r3d = Renderer3D(self.grid, view3d, scale=self.scale, timer=self.timer) if view != "bev" else None
+        if view == "v15":
+            # v15풍 화면(render_v15.py). view3d 자리에 V15Config를 받는다
+            v15 = view3d if isinstance(view3d, V15Config) else None
+            self.r3d = RendererV15(self.grid, v15, scale=self.scale, timer=self.timer)
+        else:
+            self.r3d = Renderer3D(self.grid, view3d, scale=self.scale, timer=self.timer) if view != "bev" else None
+        self.ego_speed: float | None = None  # 자차 속도(m/s). 알면 넣는다(sim, 나중에 CAN이나 GPS). v15 화면이 쓴다
         self._time = 0.0  # dt 누적(초)
+        self._occ = None  # 마지막 차선 검출 때 만든 검출 상자 바닥 마스크(v15 화면이 다시 쓴다)
         self._fps = None
         self._last_step_t = None
         self._sync_renders = 0
@@ -425,7 +440,7 @@ class RealityViewPipeline:
         #    3D만 그릴 때 ground_every > 1이면 3D 바닥을 다시 만드는 프레임에만 합성한다(그 사이는 렌더러가 지난 바닥을 쓴다)
         refresh = idx % self.ground_every == 0
         #    렌더링 스레드 모드에서는 버린 작업의 갱신을 다음 작업이 이어받을 수 있게 늘 합성한다
-        need_ground = self.show_ground and (self.view != "3d" or refresh or self._worker is not None)
+        need_ground = self.show_ground and (self.view not in ("3d", "v15") or refresh or self._worker is not None)
         #    차선 검출 차례이면 화면에 바닥을 안 깔아도(--no-ground) 바닥 영상을 합성한다
         lane_turn = self.lane_detector is not None and idx % self.lanes_every == 0
         #    보정 점검 차례(옵션)에도 바닥 영상이 필요하다
@@ -437,12 +452,14 @@ class RealityViewPipeline:
         if lane_turn:
             with tm.stage("lanes"):
                 occ = None
-                if self.lane_detector.cfg.mask_objects:
+                if self.lane_detector.cfg.mask_objects or self.view == "v15":
                     # 검출 상자 안 화소(차체)가 IPM에서 바닥으로 길게 늘어져 차선처럼 보이는 것을 뺀다.
                     # 상자가 없는 프레임은 합성을 건너뛴다(추가 시간 0)
                     masks = box_masks([f.shape[:2] for f in frames], [r.detections for r in results], AERIAL_LABELS)
                     occ = self.ipm.warp(masks, interpolation=0) if masks is not None else None
-                self._lanes = self.lane_smoother.update(self.lane_detector.detect(ground, road, occ))
+                self._lanes = self.lane_smoother.update(
+                    self.lane_detector.detect(ground, road, occ if self.lane_detector.cfg.mask_objects else None))
+                self._occ = occ
             self._lane_runs += 1
             self._lane_sum += len(self._lanes)
             self._lane_ego += int({"left", "right"} <= {ln.side for ln in self._lanes})
@@ -450,6 +467,19 @@ class RealityViewPipeline:
         if mon_turn:
             with tm.stage("calib_monitor"):
                 self.calib_monitor.update(ground, self._time)
+        # 5-3) v15 화면: 차체가 바닥으로 길게 늘어진 자리를 바닥 영상에서 지운다(3D 모델이 대신 그 자리에 선다)
+        obj_mask = None
+        if self.view == "v15" and need_ground and ground is not None:
+            with tm.stage("bev_warp"):
+                if lane_turn:
+                    obj_mask = self._occ
+                else:
+                    masks = box_masks([f.shape[:2] for f in frames], [r.detections for r in results], AERIAL_LABELS)
+                    obj_mask = self.ipm.warp(masks, interpolation=0) if masks is not None else None
+                # 트랙으로 구한 가림 자리도 더한다(검출이 빠진 카메라의 번짐까지 지운다)
+                sm = stretch_mask(self.cameras, self.ipm._owner_u8, self.grid, tracks, self.scale)
+                if sm is not None:
+                    obj_mask = sm if obj_mask is None else cv2.bitwise_or(as_u8(obj_mask), sm)
         if not need_ground:
             ground = None  # 차선 때문에 합성한 바닥은 화면에 깔지 않는다(예전 화면 그대로)
         self._time += float(dt)
@@ -463,7 +493,7 @@ class RealityViewPipeline:
 
         # 6) 렌더링(탑뷰, 카메라 주석, 대시보드 합치기)
         job = _RenderJob(tracks, ground, road, frames, results, self._fps, t=self._time, refresh_ground=refresh,
-                         lanes=self._lanes, lights=lights)
+                         lanes=self._lanes, lights=lights, obj_mask=obj_mask)
         if self._worker is None:
             with tm.stage("render"):
                 dash, bev, v3d = self._render(job)
@@ -545,9 +575,10 @@ class RealityViewPipeline:
         if self.r3d is not None:
             # 렌더링 스레드에서 불려도 timer.stage는 잠금으로 더하므로 안전하다(그 프레임 몫으로 들어간다)
             with self.timer.stage("render3d"):
+                kw = {"ego_speed": self.ego_speed, "obj_mask": job.obj_mask} if self.view == "v15" else {}
                 v3d = self.r3d.render(
                     job.tracks, job.ground, job.road, self.ipm.coverage(), refresh_ground=job.refresh_ground, t=job.t,
-                    lanes=job.lanes, lights=job.lights,
+                    lanes=job.lanes, lights=job.lights, **kw,
                 )
         views = []
         if self.show_cameras:
