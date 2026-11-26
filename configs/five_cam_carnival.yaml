@@ -33,7 +33,7 @@ cameras:
     width: 768
     height: 432
     intrinsics: {model: fisheye, fx: 315.5, fy: 315.5, cx: 384.0, cy: 216.0, dist: [0.0, 0.0, 0.0, 0.0], max_fov_deg: 160.0}
-    extrinsics: {position: [-0.965, 0.00, 1.03], yaw: 180.0, pitch: 20.0, roll: 0.0}
+    extrinsics: {position: [-0.985, 0.00, 1.02], yaw: 180.0, pitch: 20.0, roll: 0.0}
     source: {type: usb, device: /dev/v4l/by-id/usb-REAR-video-index0, fps: 30, fourcc: MJPG, capture: [1280, 720], timestamp_offset_ms: 0}
 
   - name: left
