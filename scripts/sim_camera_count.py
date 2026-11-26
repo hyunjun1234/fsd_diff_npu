@@ -40,6 +40,7 @@ from realityview.bev import BevGrid  # noqa: E402
 #   /usr/bin/python3 scripts/sim_camera_count.py run --fps 13 --det base --seeds 2 --contact drop \
 #       --layouts c4_fender,c5_side160,c7_tesla --out out/measure/19_run_drop.json
 #   /usr/bin/python3 scripts/sim_camera_count.py report --in out/measure/19_run_model.json
+#   /usr/bin/python3 scripts/sim_camera_count.py run --vehicle carnival --fps model --out out/measure/20_run_carnival.json
 
 
 # ---------------------------------------------------------------------------
@@ -122,7 +123,7 @@ def cmd_coverage(args) -> None:
     labels = _split(args.labels, ls.SIZES, "물체")
     opts = _truth_opts(args)
     tasks = [(k, args.side_pitch, args.rear_lens, lab, args.det, args.step, opts) for k in keys for lab in labels]
-    with Pool(args.jobs) as pool:
+    with Pool(args.jobs, initializer=ls.set_vehicle, initargs=(args.vehicle,)) as pool:
         rows = pool.map(_coverage_task, tasks)
     print("| 배치 | 물체 | 보이는 칸 | 가까운 곳(5m) | 앞옆 | 옆 | 뒤옆 | 평균 검출 확률 |")
     print("|---|---|---|---|---|---|---|---|")
@@ -239,7 +240,7 @@ def run_batch(specs: list[tuple], scen_keys: list[str], det_keys: list[str], arg
                                  args.vehicle_center)))
     tasks.sort(key=lambda t: -t[0])
     rows, t0 = [], time.time()
-    with Pool(args.jobs) as pool:
+    with Pool(args.jobs, initializer=ls.set_vehicle, initargs=(args.vehicle,)) as pool:
         for i, (out, sec) in enumerate(pool.imap_unordered(_run_task, [t[1] for t in tasks]), 1):
             rows += out
             if not args.quiet:
@@ -364,7 +365,7 @@ def cmd_sweep(args) -> None:
                     specs.append(("side", key, lens, m, yaw, pitch, main))
                     meta[key] = {"mount": m, "lens": lens, "yaw": yaw, "pitch": pitch}
     opts = _truth_opts(args)
-    with Pool(args.jobs) as pool:
+    with Pool(args.jobs, initializer=ls.set_vehicle, initargs=(args.vehicle,)) as pool:
         static = {r["layout"]: r for r in pool.map(_sweep_static, [(s, args.rear_lens, det_keys[0], opts, args.step) for s in specs])}
     rows = run_batch(specs, scen_keys, det_keys, args) if scen_keys else []
     by: dict = {}
@@ -405,6 +406,8 @@ def rows_for(by: dict, key: str, scen_keys: list[str]) -> list[dict]:
 # ---------------------------------------------------------------------------
 def _add_common(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--layouts", default="all", help="배치 이름(쉼표로 구분). all이면 전부")
+    ap.add_argument("--vehicle", default="model_y", choices=list(ls.EGO_BODIES),
+                    help="자차 차종. carnival이면 카니발 차체와 카니발 배치(cv5_)를 쓴다")
     ap.add_argument("--side-pitch", type=float, default=20.0, help="정측면을 보는 좌우 카메라를 아래로 숙인 각(도)")
     ap.add_argument("--rear-lens", default="imx291_160", help="후방 카메라 렌즈(LENSES의 이름)")
     ap.add_argument("--rule", default="partial", choices=["partial", "full"],
@@ -473,6 +476,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
+    ls.set_vehicle(getattr(args, "vehicle", "model_y"))
     args.func(args)
 
 

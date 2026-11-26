@@ -462,3 +462,46 @@ def test_five_cam_config_matches_simulated_layout():
     # USB 3대는 16:9 크기로 받아야 한다(받는 크기를 적지 않으면 드라이버가 4:3 모드를 고를 수 있다)
     usb = [c for c in cams if c.source["type"] == "usb"]
     assert len(usb) == 3 and all(c.source["capture"] == [1280, 720] and c.source["fourcc"] == "MJPG" for c in usb)
+
+
+# ---------------------------------------------------------------------------
+# 카니발 차체와 카니발용 설정 파일
+# ---------------------------------------------------------------------------
+def test_carnival_vehicle_switch():
+    """set_vehicle("carnival")은 차체 가림과 배치 목록을 카니발로 바꾸고, 되돌리면 모델 Y 값이 그대로다."""
+    try:
+        ls.set_vehicle("carnival")
+        assert set(ls.make_layouts()) == {"cv5_side2", "cv5_side3", "cv5_side3_fwd"}
+        wind = ls.MOUNTS["cv_wind_main"][0]
+        ahead = np.array([[ls.EGO_X_FRONT + 1.0, 0.0], [ls.EGO_X_FRONT + 3.0, 0.0]])
+        assert ls.ego_blocks(wind, ahead).tolist() == [True, False]  # 보닛 바로 앞 바닥은 가리고 3m 앞은 보인다
+        side = ls.MOUNTS["cv_side3"][0]
+        assert ls.ego_blocks(side, np.array([[0.3, 1.2]]))[0] and not ls.ego_blocks(side, np.array([[0.3, 2.2]]))[0]
+        for lay in ls.make_layouts().values():
+            assert lay.n == 5 and lay.n_usb == 3
+        with pytest.raises(ValueError):
+            ls.set_vehicle("unknown")
+    finally:
+        ls.set_vehicle("model_y")
+    assert ls.EGO_X_FRONT == 3.783 and "c5_side160" in ls.make_layouts()
+
+
+def test_five_cam_carnival_config_matches_simulated_layout():
+    """configs/five_cam_carnival.yaml이 카니발 배치 cv5_side3과 같은 자리, 방향, 렌즈를 쓰고 렌즈와 받는 크기는 five_cam.yaml과 같다."""
+    from realityview.config import load_config
+
+    cams, grid, _ = load_config(os.path.join(ROOT, "configs", "five_cam_carnival.yaml"))
+    base, _, _ = load_config(os.path.join(ROOT, "configs", "five_cam.yaml"))
+    try:
+        ls.set_vehicle("carnival")
+        sim = ls.make_layouts()["cv5_side3"].cameras()
+    finally:
+        ls.set_vehicle("model_y")
+    assert [c.name for c in cams] == [c.name for c in sim] == [c.name for c in base]
+    for c, r, b in zip(cams, sim, base):
+        assert (c.width, c.height, c.model) == (r.width, r.height, r.model)
+        assert np.allclose(c.K, r.K, atol=0.06) and np.allclose(c.K, b.K)
+        assert np.allclose(c.position, r.position) and c.yaw_deg == r.yaw_deg and c.pitch_deg == r.pitch_deg
+        assert c.max_fov_deg == r.max_fov_deg == b.max_fov_deg
+        assert c.source == b.source
+    assert (grid.x_min, grid.x_max, grid.y_min, grid.y_max) == (-15.0, 25.0, -12.0, 12.0)

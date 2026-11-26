@@ -1,0 +1,58 @@
+# 기아 카니발 2011 롱바디에 다는 5대 구성. 카메라와 렌즈, 받는 크기는 configs/five_cam.yaml과 같고 자리만 다르다.
+# 자리는 같은 차종의 3D 모델을 공식 윤거(1,685mm)에 맞춰 잰 값이다(docs/measurements/20_carnival_mount.md).
+# 좌표계: 차량 X 전방, Y 좌측, Z 위 (m). 원점은 뒷바퀴 축 중앙 바닥.
+#
+# 값은 모두 보정 전 근사값이다. 붙인 뒤 scripts/calib_intrinsics.py, scripts/calib_extrinsics.py 결과로 바꾼다.
+#   전방 2대: 앞유리 안쪽 룸미러 다리 오른쪽. 메인이 다리 쪽, 광각이 바깥쪽이고 6cm 간격이다.
+#   후방: 테일게이트 번호판 홈 위쪽 턱 아래(차 밖). 턱이 비가림이 된다.
+#   좌우: 3열 옆유리 안쪽. 유리 위쪽이 안으로 약 20도 기울어 있어 쐐기 케이스(약 40도)로 20도 아래를 보게 한다.
+# 시뮬레이션의 배치 cv5_side3(set_vehicle("carnival"))과 같은 값이다(tests/test_camera_count.py에서 확인).
+bev:
+  x_min: -15.0
+  x_max: 25.0
+  y_min: -12.0
+  y_max: 12.0
+  res: 0.05
+
+cameras:
+  - name: front
+    width: 768
+    height: 432
+    intrinsics: {model: pinhole, fx: 311.0, fy: 311.0, cx: 384.0, cy: 216.0, dist: [0.0, 0.0, 0.0, 0.0]}   # Camera Module 3 Wide, 수평 102도
+    extrinsics: {position: [2.244, -0.125, 1.53], yaw: 0.0, pitch: 3.0, roll: 0.0}
+    source: {type: picamera2, index: 0}
+
+  - name: front_main
+    width: 768
+    height: 432
+    intrinsics: {model: pinhole, fx: 564.3, fy: 564.3, cx: 384.0, cy: 216.0, dist: [0.0, 0.0, 0.0, 0.0]}   # Camera Module 3, 수평 68.5도
+    extrinsics: {position: [2.246, -0.065, 1.53], yaw: 0.0, pitch: 3.0, roll: 0.0}
+    source: {type: picamera2, index: 1}
+
+  - name: rear
+    width: 768
+    height: 432
+    intrinsics: {model: fisheye, fx: 315.5, fy: 315.5, cx: 384.0, cy: 216.0, dist: [0.0, 0.0, 0.0, 0.0], max_fov_deg: 160.0}
+    extrinsics: {position: [-0.965, 0.00, 1.03], yaw: 180.0, pitch: 20.0, roll: 0.0}
+    source: {type: usb, device: /dev/v4l/by-id/usb-REAR-video-index0, fps: 30, fourcc: MJPG, capture: [1280, 720], timestamp_offset_ms: 0}
+
+  - name: left
+    width: 768
+    height: 432
+    intrinsics: {model: fisheye, fx: 315.5, fy: 315.5, cx: 384.0, cy: 216.0, dist: [0.0, 0.0, 0.0, 0.0], max_fov_deg: 160.0}
+    extrinsics: {position: [0.28, 0.812, 1.378], yaw: 90.0, pitch: 20.0, roll: 0.0}
+    source: {type: usb, device: /dev/v4l/by-id/usb-LEFT-video-index0, fps: 30, fourcc: MJPG, capture: [1280, 720], timestamp_offset_ms: 0}
+
+  - name: right
+    width: 768
+    height: 432
+    intrinsics: {model: fisheye, fx: 315.5, fy: 315.5, cx: 384.0, cy: 216.0, dist: [0.0, 0.0, 0.0, 0.0], max_fov_deg: 160.0}
+    extrinsics: {position: [0.28, -0.812, 1.378], yaw: -90.0, pitch: 20.0, roll: 0.0}
+    source: {type: usb, device: /dev/v4l/by-id/usb-RIGHT-video-index0, fps: 30, fourcc: MJPG, capture: [1280, 720], timestamp_offset_ms: 0}
+
+npu:
+  det_hef: models/yolov8s_h8.hef
+  seg_hef: null
+  road_classes: [0]
+  score_thr: 0.4
+  seg_every: 3

@@ -114,6 +114,12 @@ MOUNTS: dict[str, tuple[tuple[float, float, float], float, float]] = {
     "side_glass": ((0.95, 0.82, 1.20), 90.0, 15.0),  # 2열 옆유리 앞쪽 안쪽
     # 사이드미러 아래(주차 보조 카메라가 달리는 자리). 좌표는 추정이다.
     "mirror": ((2.05, 1.03, 1.02), 90.0, 20.0),
+    # 기아 카니발 2011 롱바디(set_vehicle("carnival")와 함께 쓴다). 3D 모델에서 잰 자리다(20번 측정 문서).
+    "cv_wind_wide": ((2.244, -0.125, 1.53), 0.0, 3.0),  # 룸미러 다리 오른쪽, 전방 광각
+    "cv_wind_main": ((2.246, -0.065, 1.53), 0.0, 3.0),  # 룸미러 다리 오른쪽, 전방 메인
+    "cv_rear": ((-0.965, 0.00, 1.03), 180.0, 20.0),  # 번호판 홈 위 턱 아래
+    "cv_side2": ((1.15, 0.816, 1.378), 90.0, 20.0),  # 2열 슬라이딩 도어 유리 앞쪽 안쪽
+    "cv_side3": ((0.28, 0.812, 1.378), 90.0, 20.0),  # 3열 옆유리 안쪽
 }
 
 # 유리 안쪽에 달면 창틀(기둥)이 좌우 시야를 막는다. 값: (창이 향한 방향 도, 그 방향에서 좌우로 보이는 각 도).
@@ -184,10 +190,17 @@ class Layout:
         return sum(s.link == "usb" for s in self.specs)
 
 
+def _vmount(name: str) -> str:
+    """앞유리와 후방 자리 이름을 지금 차종의 자리로 바꾼다(카니발이면 cv_ 자리)."""
+    if VEHICLE == "carnival" and name in ("wind_wide", "wind_main", "rear"):
+        return "cv_" + name
+    return name
+
+
 def _front(wide: str = "cm3_wide", main: bool = False) -> list[CamSpec]:
-    out = [CamSpec("front", wide, "wind_wide", link="csi")]
+    out = [CamSpec("front", wide, _vmount("wind_wide"), link="csi")]
     if main:
-        out.append(CamSpec("front_main", "cm3", "wind_main", link="csi"))
+        out.append(CamSpec("front_main", "cm3", _vmount("wind_main"), link="csi"))
     return out
 
 
@@ -195,12 +208,30 @@ def side_layout(key: str, title: str, lens: str, mount: str, yaw: float | None =
                 main: bool = True, rear_lens: str = "imx291_160", rear_mount: str = "rear",
                 front_wide: str = "cm3_wide") -> Layout:
     """전방(광각, main이면 메인도), 후방, 좌우 한 쌍으로 된 배치. 좌우 카메라의 렌즈, 자리, 방향을 바꿔 볼 때 쓴다."""
-    return Layout(key, title, (*_front(front_wide, main), CamSpec("rear", rear_lens, rear_mount),
+    return Layout(key, title, (*_front(front_wide, main), CamSpec("rear", rear_lens, _vmount(rear_mount)),
                                *side_pair(lens, mount, yaw, pitch)))
 
 
+def _carnival_layouts(side_pitch: float, rear_lens: str) -> dict[str, Layout]:
+    """카니발 5대 배치. 전방 2대는 룸미러 다리 오른쪽, 후방은 번호판 홈 위 턱 아래이고, 좌우만 자리와 방향을 바꾼다."""
+    L = [
+        side_layout("cv5_side2", "카니발 5대: 좌우 2열 슬라이딩 도어 유리 안쪽", "imx291_160", "cv_side2", 90.0, side_pitch,
+                    rear_lens=rear_lens),
+        side_layout("cv5_side3", "카니발 5대: 좌우 3열 옆유리 안쪽", "imx291_160", "cv_side3", 90.0, side_pitch,
+                    rear_lens=rear_lens),
+        side_layout("cv5_side3_fwd", "카니발 5대: 좌우 3열 옆유리 안쪽, 앞으로 15도 돌림", "imx291_160", "cv_side3", 75.0,
+                    side_pitch, rear_lens=rear_lens),
+    ]
+    return {x.key: x for x in L}
+
+
 def make_layouts(side_pitch: float = 20.0, rear_lens: str = "imx291_160") -> dict[str, Layout]:
-    """비교할 배치 목록. side_pitch는 정측면을 보는 좌우 카메라를 아래로 숙인 각이다."""
+    """비교할 배치 목록. side_pitch는 정측면을 보는 좌우 카메라를 아래로 숙인 각이다.
+
+    차종을 카니발로 바꿨으면(set_vehicle) 카니발 배치만 돌려준다.
+    """
+    if VEHICLE == "carnival":
+        return _carnival_layouts(side_pitch, rear_lens)
     rear = [CamSpec("rear", rear_lens, "rear")]
     side90 = lambda lens: side_pair(lens, "bpillar", 90.0, side_pitch)  # noqa: E731 - 짧은 묶음
     L: list[Layout] = [
@@ -268,10 +299,30 @@ def make_layouts(side_pitch: float = 20.0, rear_lens: str = "imx291_160") -> dic
 # ---------------------------------------------------------------------------
 # 자차 차체가 가리는 곳
 # ---------------------------------------------------------------------------
-# 차체 치수는 04 문서(모델 Y). 불투명한 차체 윗면 높이(벨트라인, 보닛, 트렁크)는 추정값이다.
-EGO_X_REAR, EGO_X_FRONT, EGO_HALF_W = -1.011, 3.783, 0.96
-_EGO_TOP_X = np.array([-1.011, -0.60, 2.35, 3.783])  # 뒤끝, 뒷유리 아래, 앞유리 아래(카울), 앞끝
-_EGO_TOP_Z = np.array([1.10, 1.05, 1.05, 0.80])
+# 차종별 차체: (뒤끝 x, 앞끝 x, 반폭), 불투명한 차체 윗면(벨트라인, 보닛, 트렁크)의 높이 꺾은선 (x, z).
+# model_y는 04 문서 치수에 윗면 높이를 추정한 값(뒤끝, 뒷유리 아래, 앞유리 아래(카울), 앞끝)이다.
+# carnival은 기아 카니발 2011 롱바디 3D 모델을 윤거 1,685mm에 맞춰 잰 값이다(뒤끝, 뒷유리 아래, 카울, 보닛 셋, 앞끝).
+EGO_BODIES: dict[str, tuple[tuple[float, float, float], tuple[tuple[float, float], ...]]] = {
+    "model_y": ((-1.011, 3.783, 0.96), ((-1.011, 1.10), (-0.60, 1.05), (2.35, 1.05), (3.783, 0.80))),
+    "carnival": ((-1.087, 3.935, 0.98), ((-1.087, 1.19), (-0.93, 1.19), (2.80, 1.12), (3.30, 1.04), (3.70, 0.90),
+                                         (3.80, 0.80), (3.935, 0.60))),
+}
+VEHICLE = "model_y"
+EGO_X_REAR, EGO_X_FRONT, EGO_HALF_W = EGO_BODIES[VEHICLE][0]
+_EGO_TOP_X = np.array([p[0] for p in EGO_BODIES[VEHICLE][1]])
+_EGO_TOP_Z = np.array([p[1] for p in EGO_BODIES[VEHICLE][1]])
+
+
+def set_vehicle(name: str) -> None:
+    """자차 차종을 바꾼다. 차체 가림, 장면의 차 둘레 경로, 거리 구간, make_layouts()의 배치가 함께 바뀐다."""
+    global VEHICLE, EGO_X_REAR, EGO_X_FRONT, EGO_HALF_W, _EGO_TOP_X, _EGO_TOP_Z, EGO_CENTER_X
+    if name not in EGO_BODIES:
+        raise ValueError(f"모르는 차종: {name} (가능한 값: {', '.join(EGO_BODIES)})")
+    (EGO_X_REAR, EGO_X_FRONT, EGO_HALF_W), top = EGO_BODIES[name]
+    _EGO_TOP_X = np.array([p[0] for p in top])
+    _EGO_TOP_Z = np.array([p[1] for p in top])
+    EGO_CENTER_X = (EGO_X_REAR + EGO_X_FRONT) / 2.0
+    VEHICLE = name
 
 
 def ego_blocks(cam_pos: np.ndarray, pts: np.ndarray, skip: float = 0.25) -> np.ndarray:
