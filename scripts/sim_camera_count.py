@@ -54,11 +54,11 @@ def _split(text: str, known, what: str) -> list[str]:
 
 
 def _fps_model(args) -> ls.FpsModel:
-    return ls.FpsModel(decode_ms=args.decode_ms, seg=args.seg)
+    return ls.FpsModel(decode_ms=args.decode_ms, seg=args.seg, ground=not args.no_ground, resize_ms=args.resize_ms)
 
 
 def _truth_opts(args) -> dict:
-    return {"ego_body": not args.no_ego_body, "occlusion": not args.no_occlusion, "skew": not args.no_skew,
+    return {"ego_body": not args.no_ego_body, "occlusion": args.occlusion, "skew": not args.no_skew,
             "rule": args.rule, "contact": args.contact}
 
 
@@ -212,8 +212,10 @@ def _run_task(task: tuple) -> tuple[list[dict], float]:
     for dk in det_keys:
         items = [ls.run_once(layout, scen, ls.DET_MODELS[dk], fps, seed, truth=truth, tracker_mode=tracker,
                              vehicle_center=vehicle_center) for seed in seeds]
+        per_seed = [{k: it[k] for k in ("total", "shown", "gaps_over_1s", "id_switches", "dup_s", "false_s", "minutes")}
+                    for it in items]
         out.append({"layout": layout.key, "scenario": scen_key, "det": dk, "fps": round(fps, 2), "seeds": len(seeds),
-                    **ls.merge_summaries(items)})
+                    **ls.merge_summaries(items), "per_seed": per_seed})
     return out, time.time() - t0
 
 
@@ -358,7 +360,7 @@ def cmd_sweep(args) -> None:
         for lens in lenses:
             for yaw in yaws:
                 for pitch in pitches:
-                    key = f"{m}|{lens}|{yaw:.0f}|{pitch:.0f}"
+                    key = f"{m}|{lens}|{yaw:g}|{pitch:g}"
                     specs.append(("side", key, lens, m, yaw, pitch, main))
                     meta[key] = {"mount": m, "lens": lens, "yaw": yaw, "pitch": pitch}
     opts = _truth_opts(args)
@@ -386,7 +388,7 @@ def cmd_sweep(args) -> None:
     print("| " + " | ".join(head) + " |")
     print("|" + "---|" * len(head))
     for r in table[: args.top] if args.top else table:
-        cells = [r["mount"], r["lens"], f"{r['yaw']:.0f}", f"{r['pitch']:.0f}", _fmt(r["person_near"]), _fmt(r["car_near"])]
+        cells = [r["mount"], r["lens"], f"{r['yaw']:g}", f"{r['pitch']:g}", _fmt(r["person_near"]), _fmt(r["car_near"])]
         cells += [_fmt(r[f"{sk}_shown"]) for sk in scen_keys]
         if scen_keys:
             cells += [_fmt(r["shown"]), _fmt(r["gaps"], 2), _fmt(r["switches"], 1), _fmt(r["dup"], 1)]
@@ -409,10 +411,13 @@ def _add_common(ap: argparse.ArgumentParser) -> None:
                     help="정답 상자 규칙. full은 SimWorld처럼 상자 전체가 화각 안에 있어야 한다")
     ap.add_argument("--contact", default="keep", choices=["keep", "drop"], help="drop이면 접지점이 잘린 상자를 뺀다")
     ap.add_argument("--no-ego-body", action="store_true", help="자차 차체가 가리는 것을 끈다")
-    ap.add_argument("--no-occlusion", action="store_true", help="물체끼리 가리는 것을 끈다")
+    ap.add_argument("--occlusion", default="exact", choices=["exact", "box", "none"],
+                    help="물체끼리 가리는 것을 보는 방법. exact는 시선 단위 계산, box는 영상 상자 겹침 어림, none은 끔")
     ap.add_argument("--no-skew", action="store_true", help="카메라별 촬영 시각 어긋남을 끈다")
     ap.add_argument("--decode-ms", type=float, default=0.0, help="처리량 모형: USB 카메라 한 프레임의 MJPEG 해제 시간(ms)")
     ap.add_argument("--seg", action="store_true", help="처리량 모형: DX-M1 도로 세그를 함께 돌리는 경우")
+    ap.add_argument("--no-ground", action="store_true", help="처리량 모형: 탑뷰 바닥 영상을 끈 경우(run_demo.py --no-ground)")
+    ap.add_argument("--resize-ms", type=float, default=0.0, help="처리량 모형: USB 카메라 한 대의 영상을 줄이는 시간(ms)")
     ap.add_argument("--jobs", type=int, default=os.cpu_count() or 1)
     ap.add_argument("--out", default=None, help="결과 JSON 파일")
 

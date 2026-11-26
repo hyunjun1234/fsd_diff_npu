@@ -5,6 +5,7 @@ import math
 import os
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -115,7 +116,7 @@ def test_window_frame_limits_inside_glass_camera():
     assert ls.CamSpec("right", "imx291_160", "side_glass", right=True).clip() == (-90.0, 62.0)
     assert ls.CamSpec("left", "imx291_160", "bpillar").clip() is None
     cam = spec.build()
-    az = math.radians(25.0)  # 차 앞쪽에서 25도 = 창 방향(90도)에서 65도. 렌즈 화각(좌우 69.7도) 안, 창틀 한계(62도) 밖
+    az = math.radians(24.0)  # 차 앞쪽에서 24도 = 창 방향(90도)에서 66도. 렌즈 화각(좌우 69.7도) 안, 창틀 한계(62도) 밖
     px, py = cam.position[0] + 6.0 * math.cos(az), cam.position[1] + 6.0 * math.sin(az)
     person = ([px], [py], [0.5], [0.5], [1.7])
     assert ls.object_boxes(cam, *person, ego_body=False)[1][0]
@@ -123,6 +124,90 @@ def test_window_frame_limits_inside_glass_camera():
     turned = ls.CamSpec("left", "imx291_160", "side_glass", yaw=60.0)
     assert turned.clip() == (90.0, 62.0)
     assert not ls.object_boxes(turned.build(), *person, ego_body=False, h_clip=turned.clip())[1][0]
+
+
+def test_ego_skip_only_for_cameras_inside_the_body():
+    """차체 윗면보다 위에 달린 B필러 카메라는 바로 아래 문짝 윗선에 가려 차 옆 0.3m 안쪽 바닥을 못 본다.
+    범퍼 속 카메라는 차체 겉면까지의 짧은 구간을 건너뛰어 바로 앞 바닥을 본다."""
+    bpillar = ls.MOUNTS["bpillar"][0]
+    near = np.array([[1.2, ls.EGO_HALF_W + 0.2], [1.2, ls.EGO_HALF_W + 0.45]])
+    assert ls.ego_blocks(bpillar, near).tolist() == [True, False]
+    assert not ls.ego_blocks(ls.MOUNTS["bumper"][0], np.array([[4.5, 0.0]]))[0]
+
+
+def test_visible_share_uses_camera_facing_faces():
+    """보이는 비율은 카메라를 향한 면만으로 센다. 가리는 것이 없으면 1이고, 절반이 가리면 0.5쯤이다."""
+    spec = ls.CamSpec("left", "imx291_160", "bpillar", 90.0, 20.0)
+    cam = spec.build()
+    car = ([1.2], [6.0], [4.5], [1.9], [1.5])
+    _, ok, frac, contact = ls.object_boxes(cam, *car, ego_body=False)
+    assert ok[0] and contact[0] and frac[0] == pytest.approx(1.0, abs=1e-9)
+    # 카메라 정면(왼쪽 90도)에 선 사람을, 그 방향이 경계가 되는 창틀 한계로 자른다: 좌우 대칭이라 절반이 남는다
+    person = ([cam.position[0]], [5.0], [0.5], [0.5], [1.7])
+    _, ok, frac, _ = ls.object_boxes(cam, *person, ego_body=False, h_clip=(152.0, 62.0))
+    assert ok[0] and frac[0] == pytest.approx(0.5, abs=0.1)
+    # 보이는 점이 하나도 없으면 min_frac이 0이어도 유효하지 않다
+    assert not ls.object_boxes(cam, [-200.0], [0.0], [0.5], [0.5], [1.7], min_frac=0.0)[1][0]
+
+
+def test_contact_is_false_when_bottom_is_cut_by_image():
+    """옆에 선 트럭처럼 물체 아래쪽이 영상 아래 끝 밖으로 이어지면 접지점이 보이는 것으로 치지 않는다."""
+    cam = [c for c in ls.make_layouts()["c5_fender86"].cameras() if c.name == "right"][0]
+    boxes, ok, _, contact = ls.object_boxes(cam, [3.0], [-3.5], [8.0], [2.5], [3.0])
+    assert ok[0] and boxes[0, 3] > cam.height - 15 and not contact[0]
+
+
+def test_blocked_by_boxes_and_car_shape():
+    """승용차는 몸통과 객실 두 덩어리로 가린다: 보닛 위로는 뒤가 보이고 객실 뒤는 안 보인다. 자기 자신은 가리지 않는다."""
+    lo, hi, own = ls.occluder_boxes(["car", "person"], np.array([10.0, 0.0]), np.array([0.0, 50.0]),
+                                    np.array([4.5, 0.5]), np.array([1.9, 0.5]), np.array([1.5, 1.7]))
+    assert own.tolist() == [0, 0, 1]
+    assert hi[0, 2] == pytest.approx(ls.CAR_BODY_H * 1.5) and hi[1, 0] - lo[1, 0] == pytest.approx(ls.CAR_CABIN_L * 4.5)
+    over_hood = np.array([12.0, -6.0, 1.2])  # 보닛 구간을 가로질러 보는 자리
+    pts = np.array([[12.0, 3.0, 1.6], [12.0, 3.0, 0.2]])
+    assert ls.blocked_by_boxes(over_hood, pts, np.array([1, 1]), lo, hi, own).tolist() == [False, True]
+    over_cabin = np.array([10.0, -6.0, 1.2])  # 객실 구간을 가로질러 보는 자리
+    assert ls.blocked_by_boxes(over_cabin, np.array([[10.0, 3.0, 1.6]]), np.array([1]), lo, hi, own)[0]
+    assert not ls.blocked_by_boxes(over_cabin, np.array([[10.0, 0.95, 0.5]]), np.array([0]), lo, hi, own)[0]
+    # 무작위 시선을 잘게 나눠 상자 안에 드는지 직접 세어 본 결과와 같다
+    rng = np.random.default_rng(5)
+    cam = np.array([0.0, 0.0, 1.2])
+    pts = np.stack([rng.uniform(4.0, 30.0, 400), rng.uniform(-8.0, 8.0, 400), rng.uniform(0.0, 3.0, 400)], axis=1)
+    got = ls.blocked_by_boxes(cam, pts, np.full(400, 1), lo, hi, own)
+    tau = np.linspace(0.0, 1.0, 2001)[1:-1]
+    q = cam + tau[None, :, None] * (pts - cam)[:, None, :]
+    want = np.zeros(400, dtype=bool)
+    for k in range(2):  # 승용차의 두 덩어리
+        want |= np.all((q >= lo[k]) & (q <= hi[k]), axis=2).any(axis=1)
+    assert (got != want).sum() <= 2  # 모서리를 스치는 시선만 다를 수 있다
+
+
+def test_exact_occlusion_in_object_boxes():
+    """앞차 뒤에 완전히 가린 차와 트럭 뒤의 사람은 빠지고, 보닛 너머로 윗몸만 보이는 사람은 보이는 비율이 줄어든다."""
+    front = ls.CamSpec("front", "cm3_wide", "wind_wide").build()
+    x, y = np.array([10.0, 26.0]), np.zeros(2)
+    size = (np.full(2, 4.5), np.full(2, 1.9), np.full(2, 1.5))
+    blk = ls.occluder_boxes(["car", "car"], x, y, *size)
+    assert ls.object_boxes(front, x, y, *size)[1].tolist() == [True, True]
+    assert ls.object_boxes(front, x, y, *size, blockers=blk)[1].tolist() == [True, False]
+    side = ls.CamSpec("left", "imx291_160", "bpillar", 90.0, 20.0).build()
+    x, y = np.array([1.2, 1.2]), np.array([3.5, 6.5])
+    size = (np.array([8.0, 0.5]), np.array([2.5, 0.5]), np.array([3.0, 1.7]))
+    blk = ls.occluder_boxes(["truck", "person"], x, y, *size)
+    assert ls.object_boxes(side, x, y, *size, blockers=blk)[1].tolist() == [True, False]
+    # 옆에 선 승용차의 보닛 구간 너머에 선 사람: 허리 위만 보인다
+    x, y = np.array([-0.54, 1.2]), np.array([3.6, 6.0])
+    size = (np.array([4.5, 0.5]), np.array([1.9, 0.5]), np.array([1.5, 1.7]))
+    blk = ls.occluder_boxes(["car", "person"], x, y, *size)
+    _, ok0, frac0, touch0 = ls.object_boxes(side, x, y, *size)
+    _, ok1, frac1, touch1 = ls.object_boxes(side, x, y, *size, blockers=blk)
+    assert ok0[1] and frac0[1] == pytest.approx(1.0, abs=1e-9) and touch0[1]
+    assert ok1[1] and 0.3 < frac1[1] < 0.6 and not touch1[1]
+    # build_truth의 기본값이 이 계산이다
+    scen = ls.Scenario("t", "t", [ls.Actor("car", lambda t: (10.0, 0.0, 0)), ls.Actor("car", lambda t: (26.0, 0.0, 0))], 0.2)
+    lay = ls.make_layouts()["c2_now"]
+    seen = lambda occ: {e[0] for fr in ls.build_truth(lay, scen, 10.0, occlusion=occ)[1] for e in fr.cams[0]}
+    assert seen("exact") == {0} and seen("none") == {0, 1}
 
 
 # ---------------------------------------------------------------------------
@@ -187,7 +272,14 @@ def test_fps_model_matches_measured_points():
     assert fm.fps(4, 2) > fm.fps(5, 3) > fm.fps(6, 4) > fm.fps(7, 5) > fm.fps(8, 6)
     assert ls.FpsModel(decode_ms=10.0).fps(5, 3) < fm.fps(5, 3)
     assert ls.FpsModel(decode_ms=10.0).fps(5, 0) == pytest.approx(fm.fps(5, 0))  # USB 카메라가 없으면 해제 부담도 없다
-    assert ls.FpsModel(seg=True).frame_ms(2) == pytest.approx(51.0, abs=1.0)  # 2대 세그 동시 실행 실측 51.0ms
+    # 4대 실측에는 가짜 USB 카메라 2대의 파일 해제가 들어 있다: 그 정도 부담까지는 실측값 그대로다
+    assert ls.FpsModel(decode_ms=1.5).frame_ms(4, 2) == pytest.approx(62.2, abs=0.05)
+    assert ls.FpsModel(seg=True).frame_ms(2) == pytest.approx(51.0, abs=0.1)  # 2대 세그 동시 실행 실측 51.0ms
+    # 바닥 영상을 끄면 바닥 합성 단계(2대 9.5ms, 4대 19.8ms)가 빠진다
+    off = ls.FpsModel(ground=False)
+    assert off.frame_ms(2) == pytest.approx(38.2 - 9.5, abs=0.05) and off.frame_ms(4) == pytest.approx(62.2 - 19.8, abs=0.05)
+    assert off.frame_ms(7) == pytest.approx(15.0 + 6.85 * 7, abs=0.05)
+    assert ls.FpsModel(resize_ms=1.4).frame_ms(5, 3) == pytest.approx(fm.frame_ms(5) + 4.2)
 
 
 def test_layouts_are_consistent():
@@ -252,6 +344,68 @@ def _walk(key: str, seconds: float = 24.0, fps: float = 13.0) -> dict:
     scen = ls.make_scenarios()["walk"]
     scen.duration = seconds
     return ls.merge_summaries([ls.run_once(ls.make_layouts()[key], scen, ls.DET_MODELS["base"], fps, 0)])
+
+
+def _frame(xy) -> ls.FrameTruth:
+    xy = np.asarray(xy, dtype=np.float64).reshape(-1, 2)
+    return ls.FrameTruth(0.0, xy, np.zeros(len(xy), dtype=int), np.ones(len(xy), dtype=bool), [[]])
+
+
+def _trk(tid: int, label: str, x: float, y: float) -> SimpleNamespace:
+    return SimpleNamespace(tid=tid, label=label, xy=np.array([x, y], dtype=np.float64))
+
+
+def test_long_vehicle_is_matched_by_distance_to_its_centre_line():
+    """트럭과 버스는 중심점이 아니라 길이 방향 중심선에서 잰다: 끝자락 옆의 트랙은 맞고, 옆으로 멀리 떨어진 트랙은 아니다."""
+    assert ls.body_distance(8.5, 6.5, 5.0, 5.0, "truck", 8.0, 2.5) == pytest.approx(math.hypot(0.75, 1.5))
+    assert ls.body_distance(5.0, 9.2, 5.0, 5.0, "truck", 8.0, 2.5) == pytest.approx(4.2)
+    assert ls.body_distance(5.0, 9.2, 5.0, 5.0, "truck", 2.5, 8.0) == pytest.approx(4.2 - 2.75)  # Y방향으로 선 트럭
+    assert ls.body_distance(8.5, 6.5, 5.0, 5.0, "car", 4.5, 1.9) == pytest.approx(math.hypot(3.5, 1.5))
+    truck = [ls.Actor("truck", lambda t: (5.0, 5.0, 0))]
+    m = ls.Metrics(ls.BevGrid(), 0.1)
+    m.add(truck, _frame([[5.0, 5.0]]), [_trk(1, "truck", 8.5, 6.5)])
+    m.add(truck, _frame([[5.0, 5.0]]), [_trk(1, "truck", 5.0, 9.2)])
+    s = m.summary()
+    assert (s["shown"], s["total"], s["false_tracks"], s["dup"]) == (1, 2, 1, 0)
+
+
+def test_id_switch_ignores_flip_between_duplicate_tracks():
+    """한 물체에 트랙이 둘 붙어 있을 때 더 가까운 쪽이 바뀌어도, 먼저 짝이던 트랙이 반경 안에 있으면 ID 바뀜이 아니다."""
+    car = [ls.Actor("car", lambda t: (10.0, 0.0, 0))]
+    m = ls.Metrics(ls.BevGrid(), 0.1)
+    m.add(car, _frame([[10.0, 0.0]]), [_trk(1, "car", 10.5, 0.0)])
+    m.add(car, _frame([[10.0, 0.0]]), [_trk(1, "car", 11.0, 0.0), _trk(2, "car", 10.1, 0.0)])
+    m.add(car, _frame([[10.0, 0.0]]), [_trk(2, "car", 10.1, 0.0)])  # 먼저 짝이던 트랙이 사라지면 그때 바뀐다
+    s = m.summary()
+    assert (s["shown"], s["dup"], s["id_switches"]) == (3, 1, 1)
+
+
+def test_switches_and_duplicates_count_only_on_screen():
+    """화면 범위(탑뷰와 3D 전방) 밖에서 일어난 ID 바뀜, 중복, 헛 표시는 세지 않는다."""
+    car = [ls.Actor("car", lambda t: (-30.0, 3.5, 0))]  # 탑뷰 뒤끝(-15m)보다 뒤
+    m = ls.Metrics(ls.BevGrid(), 0.1)
+    m.add(car, _frame([[-30.0, 3.5]]), [_trk(1, "car", -30.0, 3.5), _trk(3, "car", -31.0, 3.5)])
+    m.add(car, _frame([[-30.0, 3.5]]), [_trk(2, "car", -30.0, 3.5), _trk(4, "person", -30.0, 9.0)])
+    s = m.summary()
+    assert (s["total"], s["id_switches"], s["dup"], s["false_tracks"]) == (0, 0, 0, 0)
+    m = ls.Metrics(ls.BevGrid(), 0.1)
+    car = [ls.Actor("car", lambda t: (-10.0, 3.5, 0))]
+    m.add(car, _frame([[-10.0, 3.5]]), [_trk(1, "car", -10.0, 3.5), _trk(3, "car", -11.0, 3.5)])
+    m.add(car, _frame([[-10.0, 3.5]]), [_trk(2, "car", -10.0, 3.5), _trk(4, "person", -10.0, 9.0)])
+    s = m.summary()
+    assert (s["total"], s["id_switches"], s["dup"], s["false_tracks"]) == (2, 1, 1, 1)
+
+
+def test_difficulty_factors_follow_camera_name():
+    """같은 seed에서 같은 이름의 카메라는 배치가 달라도(4대, 5대) 같은 배율을 받는다."""
+    L = ls.make_layouts()
+    c4, c5 = L["c4_side160"].cameras(), L["c5_side160"].cameras()
+    f4, f5 = ls.difficulty_factors(c4, 6, 0.25, 7), ls.difficulty_factors(c5, 6, 0.25, 7)
+    n4, n5 = [c.name for c in c4], [c.name for c in c5]
+    for name in ("front", "rear", "left", "right"):
+        assert np.allclose(f4[n4.index(name)], f5[n5.index(name)])
+    assert not np.allclose(f5[n5.index("left")], f5[n5.index("right")])
+    assert not np.allclose(f5, ls.difficulty_factors(c5, 6, 0.25, 8))
 
 
 def test_metrics_count_objects_no_camera_sees():

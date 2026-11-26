@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+from functools import lru_cache
+import zlib
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -16,10 +18,11 @@ from .types import Detection
 # 흐름
 #   1) 배치(Layout): 렌즈(LENSES)와 장착 자리(MOUNTS)를 골라 Camera 목록을 만든다.
 #   2) 장면(Scenario): 자차 주변을 움직이는 물체(Actor)의 경로를 정한다. 좌표는 자차 기준(차량 좌표계)이다.
-#   3) 정답 상자: 프레임마다 카메라별로 물체 상자를 계산한다. 규칙은 SimWorld._draw_object와 같다
-#      (상자 꼭짓점 8개가 모두 화각 안, 접지점이 영상 안). 여기에 자차 차체(보닛 등)에 접지점이 가리는 경우와
-#      앞 물체에 가리는 경우를 더 뺀다.
-#   4) 검출: 정답 상자에 화소 잡음을 섞고, NPU 입력(640) 기준 상자 크기가 작을수록 더 자주 놓친다(DetModel).
+#   3) 정답 상자: 프레임마다 카메라별로 물체 상자를 계산한다. 물체 겉면에 점을 찍어 화각과 영상 안에 들어오고
+#      자차 차체, 창틀, 다른 물체에 가리지 않는 점만으로 상자를 만든다(object_boxes의 partial 규칙).
+#      일부만 보이는 물체는 보이는 부분만 상자가 되고, 보이는 비율이 함께 남는다.
+#   4) 검출: 정답 상자에 화소 잡음을 섞고, NPU 입력(640) 기준 상자 크기가 작을수록, 보이는 비율이 낮을수록
+#      더 자주 놓친다(DetModel).
 #   5) 추적: 실제 파이프라인과 같은 함수(project_detections -> merge_cross_camera -> BevTracker)를 그대로 쓴다.
 #   6) 지표: 화면 범위 안의 모든 물체(카메라에 안 보이는 것 포함)에 대해 화면에 나온 비율, 끊긴 시간,
 #      ID 바뀜, 중복 표시, 위치 오차를 센다.
@@ -90,6 +93,8 @@ LENSES: dict[str, Lens] = {
     "tesla_bpillar_90": _pin(768, 498, 90.0),
     "tesla_fender_80": _pin(768, 498, 80.0),
     "tesla_rear_130": _fish(768, 498, 130.0, False),
+    # 좌우 렌즈의 수평 화각 하한을 찾을 때 쓰는 가정값(등거리 어안, 수평 화각으로 지정)
+    **{f"h{h}": _fish(768, 432, float(h), False) for h in (126, 130, 134, 145, 150)},
 }
 
 
@@ -275,7 +280,8 @@ def ego_blocks(cam_pos: np.ndarray, pts: np.ndarray, skip: float = 0.25) -> np.n
     차체는 바닥 네모(EGO_X_REAR~EGO_X_FRONT, 폭 2 x EGO_HALF_W) 위에 윗면 높이가 x에 따라 꺾은선으로 바뀌는 덩어리다.
     시선의 높이와 차체 윗면 높이는 둘 다 시선을 따라 구간별 직선이므로, 시선이 네모 안에 있는 구간의 양 끝과
     윗면이 꺾이는 x에서만 "시선 높이 < 윗면 높이"를 보면 된다.
-    카메라에서 skip m까지는 보지 않는다(카메라가 차체 겉면이나 홈 안에 달려 있어도 스스로 가리지 않게).
+    카메라가 차체 속에 묻혀 있으면(범퍼, 번호판 위) 카메라에서 skip m까지는 보지 않는다(스스로 가리지 않게).
+    차체 윗면보다 위에 달린 카메라는 skip 없이 계산해서, 바로 아래 문짝 윗선에 가리는 바닥도 가린 것으로 본다.
     """
     p = np.asarray(pts, dtype=np.float64)
     if p.ndim == 1:
@@ -285,6 +291,9 @@ def ego_blocks(cam_pos: np.ndarray, pts: np.ndarray, skip: float = 0.25) -> np.n
     if p.shape[0] == 0:
         return np.zeros(0, dtype=bool)
     c = np.asarray(cam_pos, dtype=np.float64)
+    if not (EGO_X_REAR <= c[0] <= EGO_X_FRONT and abs(c[1]) <= EGO_HALF_W
+            and c[2] < float(np.interp(c[0], _EGO_TOP_X, _EGO_TOP_Z))):
+        skip = 0.0  # 차체 윗면보다 위(B필러, 유리 안쪽)나 차체 밖에 달린 카메라는 처음부터 계산한다
     d = p - c
     length = np.linalg.norm(d, axis=1)
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -322,33 +331,58 @@ def ego_blocks(cam_pos: np.ndarray, pts: np.ndarray, skip: float = 0.25) -> np.n
 # 두 가지 규칙이 있다.
 #   full   : SimWorld._draw_object와 같다. 상자 꼭짓점 8개가 모두 카메라 앞(어안은 화각 안)에 있고 접지점이
 #            영상 안에 있어야 한다. 옆 차로에서 나란히 달리는 차처럼 영상보다 넓게 걸친 물체는 빠진다.
-#   partial: 물체 겉면(옆면 2, 앞뒤면 2, 윗면)에 점을 촘촘히 찍고, 화각과 영상 안에 들어오면서 자차 차체에
-#            가리지 않는 점만으로 상자를 만든다(기본). 실제 검출기가 화면 가장자리에 걸리거나 보닛 위로만
-#            보이는 차를 보이는 부분만 상자로 잡는 것과 같다. 함께 돌려주는 값:
-#              frac    보이는 점의 비율. 검출 모형이 이 값이 낮으면 더 자주 놓친다.
-#              contact 상자 아래 끝이 실제 접지점(물체 바닥)인지. 아래가 잘리면 파이프라인은 잘린 자리를
-#                      접지점으로 알고 거리를 계산하므로 위치가 어긋난다. contact="drop"이면 이런 상자를 뺀다.
+#   partial: 물체 겉면 가운데 카메라를 향한 면(옆면, 앞뒤면, 윗면)에 점을 0.15m 간격으로 찍고, 화각과 영상 안에
+#            들어오면서 자차 차체나 다른 물체에 가리지 않는 점만으로 상자를 만든다(기본). 실제 검출기가 화면
+#            가장자리에 걸리거나 보닛 위로만 보이는 차를 보이는 부분만 상자로 잡는 것과 같다. 함께 돌려주는 값:
+#              frac    보이는 비율. 카메라에서 본 물체의 겉보기 크기(입체각) 가운데 보이는 몫이다. 가리는 것이
+#                      없고 영상 안에 다 들어오면 1이고, 검출 모형은 이 값이 낮으면 더 자주 놓친다.
+#              contact 상자 아래 끝이 실제 접지점(물체 바닥)인지. 아래가 영상 밖으로 잘리거나 가리면 파이프라인은
+#                      잘린 자리를 접지점으로 알고 거리를 계산하므로 위치가 어긋난다. contact="drop"이면 이런
+#                      상자를 뺀다.
 MIN_AREA = 60.0  # 영상 상자 최소 넓이(px^2). SimWorld와 같다
 
 
-def _surface_template(n_long: int = 24, n_short: int = 10, n_up: int = 10) -> np.ndarray:
-    """단위 상자 겉면의 점 (P,3). 좌표는 (길이 방향 -0.5~0.5, 폭 방향 -0.5~0.5, 높이 0~1)."""
-    a = np.linspace(-0.5, 0.5, n_long)
-    b = np.linspace(-0.5, 0.5, n_short)
-    c = np.linspace(0.0, 1.0, n_up)
-    out = []
+SURFACE_SPACING = 0.15  # 겉면 점 간격(m)
+SURFACE_N_MIN, SURFACE_N_MAX = 6, 56  # 한 변에 찍는 점 수의 한계(11m 버스는 0.2m 간격이 된다)
+
+
+@lru_cache(maxsize=128)
+def _box_template(length: float, width: float, height: float) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """상자 겉면(옆면 2, 앞뒤면 2, 윗면)에 찍은 점. 좌표는 바닥 중심 기준이다.
+
+    돌려주는 값: 점(P,3), 면 번호(P,), 그 점이 대표하는 넓이(P,), 바닥 줄(높이 0)인지(P,).
+    면 번호: 0 = y가 작은 쪽 옆면, 1 = y가 큰 쪽 옆면, 2 = x가 작은 쪽 끝면, 3 = x가 큰 쪽 끝면, 4 = 윗면.
+    모서리에도 점을 두어 상자 끝이 정확히 잡히게 하고, 넓이는 사다리꼴 규칙으로 나눈다(끝 점은 절반).
+    """
+    def axis(lo: float, hi: float) -> tuple[np.ndarray, np.ndarray]:
+        n = int(min(SURFACE_N_MAX, max(SURFACE_N_MIN, math.ceil((hi - lo) / SURFACE_SPACING) + 1)))
+        w = np.ones(n)
+        w[0] = w[-1] = 0.5
+        return np.linspace(lo, hi, n), w * (hi - lo) / w.sum()
+
+    a, wa = axis(-length / 2.0, length / 2.0)
+    b, wb = axis(-width / 2.0, width / 2.0)
+    c, wc = axis(0.0, height)
+    pts, face, area = [], [], []
+
+    def add(f: int, p: np.ndarray, w: np.ndarray) -> None:
+        pts.append(p)
+        face.append(np.full(len(p), f))
+        area.append(w)
+
     A, C = np.meshgrid(a, c, indexing="ij")
-    for side in (-0.5, 0.5):  # 옆면
-        out.append(np.stack([A.ravel(), np.full(A.size, side), C.ravel()], axis=1))
+    for f, v in ((0, -width / 2.0), (1, width / 2.0)):
+        add(f, np.stack([A.ravel(), np.full(A.size, v), C.ravel()], axis=1), np.outer(wa, wc).ravel())
     B, C = np.meshgrid(b, c, indexing="ij")
-    for end in (-0.5, 0.5):  # 앞뒤면
-        out.append(np.stack([np.full(B.size, end), B.ravel(), C.ravel()], axis=1))
+    for f, v in ((2, -length / 2.0), (3, length / 2.0)):
+        add(f, np.stack([np.full(B.size, v), B.ravel(), C.ravel()], axis=1), np.outer(wb, wc).ravel())
     A, B = np.meshgrid(a, b, indexing="ij")
-    out.append(np.stack([A.ravel(), B.ravel(), np.ones(A.size)], axis=1))  # 윗면
-    return np.concatenate(out, axis=0)
-
-
-_SURFACE = _surface_template()
+    add(4, np.stack([A.ravel(), B.ravel(), np.full(A.size, height)], axis=1), np.outer(wa, wb).ravel())
+    p = np.concatenate(pts)
+    out = (p, np.concatenate(face), np.concatenate(area), p[:, 2] <= 1e-12)
+    for v in out:
+        v.setflags(write=False)
+    return out
 
 
 def fast_project(cam: Camera, pts: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -396,10 +430,12 @@ def _in_h_clip(cam: Camera, pts: np.ndarray, h_clip: tuple[float, float]) -> np.
 
 def object_boxes(cam: Camera, x, y, length, width, height, rule: str = "partial", ego_body: bool = True,
                  min_frac: float = 0.05, h_clip: tuple[float, float] | None = None,
+                 blockers: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
                  ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """도로와 나란한 상자 N개의 영상 상자(N,4: x1,y1,x2,y2), 유효 여부(N,), 보이는 비율(N,), 접지점이 보이는지(N,).
 
     h_clip = (가운데 방향 도, 반각 도)를 주면 그 밖에 있는 점은 보이지 않는 것으로 한다(창틀에 가림).
+    blockers = occluder_boxes()의 결과를 주면 다른 물체에 가린 점도 뺀다(partial 규칙에서만).
     """
     x, y, length, width, height = (np.asarray(v, dtype=np.float64).reshape(-1) for v in (x, y, length, width, height))
     n = x.size
@@ -426,36 +462,77 @@ def object_boxes(cam: Camera, x, y, length, width, height, rule: str = "partial"
         return boxes, ok, ok.astype(np.float64), ok.copy()
     if rule != "partial":
         raise ValueError(f"rule은 full 또는 partial이어야 합니다: {rule}")
-    size = np.stack([length, width, height], axis=1)  # (N,3)
-    pts = _SURFACE[None, :, :] * size[:, None, :]  # (N,P,3)
-    pts[..., 0] += x[:, None]
-    pts[..., 1] += y[:, None]
-    P = pts.shape[1]
-    flat = pts.reshape(-1, 3)
+    cpos = np.asarray(cam.position, dtype=np.float64)
+    boxes = np.zeros((n, 4))
+    ok = np.zeros(n, dtype=bool)
+    frac = np.zeros(n)
+    contact = np.zeros(n, dtype=bool)
+    live = np.isfinite(x) & np.isfinite(y) & (np.abs(x) < 1e5) & (np.abs(y) < 1e5)
+    size = np.round(np.stack([length, width, height], axis=1), 4)
+    p_all, o_all, w_all, b_all = [], [], [], []
+    for L, W, H in np.unique(size[live], axis=0):
+        mem = np.nonzero(live & (size[:, 0] == L) & (size[:, 1] == W) & (size[:, 2] == H))[0]
+        tp, tf, ta, tb = _box_template(float(L), float(W), float(H))
+        # 카메라가 각 면의 바깥쪽으로 떨어진 거리. 양수인 면만 카메라를 향한다(뒷면은 물체 자신에 가려 안 보인다).
+        out_d = np.stack([(y[mem] - W / 2.0) - cpos[1], cpos[1] - (y[mem] + W / 2.0),
+                          (x[mem] - L / 2.0) - cpos[0], cpos[0] - (x[mem] + L / 2.0),
+                          np.full(mem.size, cpos[2] - H)], axis=1)  # (물체, 면 5개)
+        hs = out_d[:, tf]  # (물체, 점)
+        oi, pi = np.nonzero(hs > 1e-9)  # 물체 순서대로 나온다
+        if oi.size == 0:
+            continue
+        p = tp[pi].copy()
+        p[:, 0] += x[mem][oi]
+        p[:, 1] += y[mem][oi]
+        dist = np.maximum(np.linalg.norm(p - cpos, axis=1), 1e-6)
+        p_all.append(p)
+        o_all.append(mem[oi])
+        w_all.append(ta[pi] * hs[oi, pi] / dist ** 3)  # 카메라에서 본 입체각 = 넓이 x cos / 거리^2
+        b_all.append(tb[pi])
+    if not p_all:
+        return boxes, ok, frac, contact
+    flat = np.concatenate(p_all)
+    owner = np.concatenate(o_all)
+    wgt = np.concatenate(w_all)
+    bottom = np.concatenate(b_all)
     uv, front = fast_project(cam, flat)
+    u, v = uv[:, 0], uv[:, 1]
     with np.errstate(invalid="ignore"):
-        vis = front & (uv[:, 0] >= 0) & (uv[:, 0] <= w1) & (uv[:, 1] >= 0) & (uv[:, 1] <= h1)
+        in_u = front & (u >= 0) & (u <= w1)
+        vis = in_u & (v >= 0) & (v <= h1)
+        below = in_u & (v > h1)  # 영상 아래 끝 밖으로 이어지는 부분
     if h_clip is not None:
-        vis &= _in_h_clip(cam, flat, h_clip)
+        in_clip = _in_h_clip(cam, flat, h_clip)
+        vis &= in_clip
+        below &= in_clip
     if ego_body and vis.any():
         idx = np.nonzero(vis)[0]
-        vis[idx] = ~ego_blocks(cam.position, flat[idx])
-    vis = vis.reshape(n, P)
-    uv = uv.reshape(n, P, 2)
-    frac = vis.mean(axis=1)
+        vis[idx] = ~ego_blocks(cpos, flat[idx])
+    if blockers is not None and vis.any():
+        idx = np.nonzero(vis)[0]
+        vis[idx] = ~blocked_by_boxes(cpos, flat[idx], owner[idx], *blockers)
+    first = np.r_[True, owner[1:] != owner[:-1]]
+    start = np.nonzero(first)[0]
+    seg = owner[start]  # 구간마다 물체 번호
+    seg_of = np.cumsum(first) - 1
     big = 1e9
-    x1 = np.where(vis, uv[..., 0], big).min(axis=1)
-    y1 = np.where(vis, uv[..., 1], big).min(axis=1)
-    x2 = np.where(vis, uv[..., 0], -big).max(axis=1)
-    vv = np.where(vis, uv[..., 1], -big)
-    low = vv.argmax(axis=1)  # 영상에서 가장 아래에 보이는 점
-    y2 = vv[np.arange(n), low]
-    contact = _SURFACE[low, 2] <= 1e-9  # 그 점이 물체 바닥(높이 0)이면 접지점이 보이는 것
-    ok = frac >= min_frac
-    boxes = np.stack([x1, y1, x2, y2], axis=1)
-    ok &= (x2 - x1) * (y2 - y1) >= MIN_AREA
-    boxes[~ok] = 0.0
-    return boxes, ok, np.where(ok, frac, 0.0), contact & ok
+    x1 = np.minimum.reduceat(np.where(vis, u, big), start)
+    y1 = np.minimum.reduceat(np.where(vis, v, big), start)
+    x2 = np.maximum.reduceat(np.where(vis, u, -big), start)
+    y2 = np.maximum.reduceat(np.where(vis, v, -big), start)
+    share = np.add.reduceat(np.where(vis, wgt, 0.0), start) / np.maximum(np.add.reduceat(wgt, start), 1e-300)
+    seen = np.add.reduceat(vis.astype(np.int64), start) > 0
+    # 접지점: 영상에서 가장 아래에 보이는 점이 물체 바닥(높이 0)이고, 물체가 영상 아래 끝 밖으로 이어지지 않아야 한다
+    lowest = vis & bottom & (v >= y2[seg_of] - 1e-6)
+    touch = (np.add.reduceat(lowest.astype(np.int64), start) > 0) & (np.add.reduceat(below.astype(np.int64), start) == 0)
+    good = seen & (share >= min_frac)
+    with np.errstate(invalid="ignore"):
+        good &= (x2 - x1) * (y2 - y1) >= MIN_AREA
+    boxes[seg[good]] = np.stack([x1, y1, x2, y2], axis=1)[good]
+    ok[seg[good]] = True
+    frac[seg[good]] = share[good]
+    contact[seg[good]] = touch[good]
+    return boxes, ok, frac, contact
 
 
 def ground_contact_hidden(cam: Camera, boxes: np.ndarray, ok: np.ndarray) -> np.ndarray:
@@ -473,9 +550,79 @@ def ground_contact_hidden(cam: Camera, boxes: np.ndarray, ok: np.ndarray) -> np.
     return out
 
 
+# 다른 물체가 가리는 곳 ------------------------------------------------------
+# 승용차는 통짜 상자가 아니라 아래 몸통과 가운데 객실, 두 덩어리로 본다. 보닛과 트렁크 위로는 뒤에 있는 물체가
+# 보이기 때문이다. 비율은 추정값이다(높이 1.5m 차에서 몸통 0.98m, 길이 4.5m 차에서 객실 2.5m).
+CAR_BODY_H = 0.65  # 몸통(보닛, 트렁크) 높이 / 전체 높이
+CAR_CABIN_L = 0.55  # 객실 길이 / 전체 길이
+
+
+def occluder_boxes(labels: list[str], x, y, length, width, height, along_y=None,
+                   ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """물체마다 시선을 가리는 덩어리를 만든다. 돌려주는 값: 아래 모서리(K,3), 위 모서리(K,3), 물체 번호(K,).
+
+    length와 width는 Actor.size()처럼 X방향, Y방향 길이다. along_y[i]가 True면 차체가 Y축 방향이라 객실도 Y방향으로 줄인다.
+    x가 유한하지 않거나 장면 밖 표시(1e5 이상)인 물체는 넣지 않는다.
+    """
+    lo, hi, owner = [], [], []
+    for i, lab in enumerate(labels):
+        if not (np.isfinite(x[i]) and abs(x[i]) < 1e5):
+            continue
+        hx, hy, h = length[i] / 2.0, width[i] / 2.0, height[i]
+        if lab == "car":
+            lo.append((x[i] - hx, y[i] - hy, 0.0)); hi.append((x[i] + hx, y[i] + hy, CAR_BODY_H * h)); owner.append(i)
+            if along_y is not None and along_y[i]:
+                hy *= CAR_CABIN_L
+            else:
+                hx *= CAR_CABIN_L
+            lo.append((x[i] - hx, y[i] - hy, CAR_BODY_H * h)); hi.append((x[i] + hx, y[i] + hy, h)); owner.append(i)
+        else:
+            lo.append((x[i] - hx, y[i] - hy, 0.0)); hi.append((x[i] + hx, y[i] + hy, h)); owner.append(i)
+    return np.array(lo, dtype=np.float64).reshape(-1, 3), np.array(hi, dtype=np.float64).reshape(-1, 3), \
+        np.array(owner, dtype=int)
+
+
+def blocked_by_boxes(cam_pos: np.ndarray, pts: np.ndarray, pt_owner: np.ndarray, lo: np.ndarray, hi: np.ndarray,
+                     box_owner: np.ndarray) -> np.ndarray:
+    """카메라에서 점(M,3)까지의 시선이 다른 물체의 덩어리(축에 나란한 상자 K개)를 지나는지(M,) bool.
+
+    pt_owner[m]과 box_owner[k]가 같으면 자기 자신이라 보지 않는다(물체가 자기 뒷면을 가리는 것은 세지 않는다.
+    보이는 비율 frac의 기준이 "가리는 것이 없을 때 1"이 되도록).
+    시선 c + tau x d (tau 0~1)가 상자 안에 있는 구간을 축마다 구해 겹치는지 본다(slab 방법).
+    """
+    m = len(pts)
+    out = np.zeros(m, dtype=bool)
+    if m == 0 or len(lo) == 0:
+        return out
+    c = np.asarray(cam_pos, dtype=np.float64)
+    d = np.asarray(pts, dtype=np.float64) - c
+    dist = np.linalg.norm(d, axis=1)
+    unit = d / np.maximum(dist, 1e-9)[:, None]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        inv = 1.0 / d
+    ctr = (lo + hi) / 2.0 - c
+    rad = np.linalg.norm(hi - lo, axis=1) / 2.0  # 상자를 감싸는 공의 반지름
+    cd = np.linalg.norm(ctr, axis=1)
+    for k in range(len(lo)):
+        # 먼저 걸러 낸다: 자기 자신, 상자보다 앞에 있는 점, 상자를 감싸는 공 밖으로 지나가는 시선
+        sel = (pt_owner != box_owner[k]) & ~out & (dist > cd[k] - rad[k])
+        if cd[k] > rad[k]:
+            sel &= unit @ (ctr[k] / cd[k]) >= math.sqrt(1.0 - (rad[k] / cd[k]) ** 2)
+        idx = np.nonzero(sel)[0]
+        if idx.size == 0:
+            continue
+        with np.errstate(invalid="ignore"):
+            t1 = (lo[k] - c) * inv[idx]
+            t2 = (hi[k] - c) * inv[idx]
+            t_in = np.fmin(t1, t2).max(axis=1)
+            t_out = np.fmax(t1, t2).min(axis=1)
+            out[idx] = (t_out > np.maximum(t_in, 0.0)) & (t_in < 1.0 - 1e-6)
+    return out
+
+
 def occluded_by_others(boxes: np.ndarray, ok: np.ndarray, dist: np.ndarray, width: int, height: int,
                        thr: float = 0.6, shrink: float = 0.15, cell: int = 8) -> np.ndarray:
-    """더 가까운 물체의 상자에 넓이의 thr 이상이 덮인 물체(N,) bool.
+    """더 가까운 물체의 상자에 넓이의 thr 이상이 덮인 물체(N,) bool. 예전 어림 방식이고 비교용으로 남겨 둔다.
 
     상자끼리 겹침으로 어림한다. 3D 상자의 영상 상자는 빈 모서리를 포함하므로 가리는 쪽 상자는 사방을
     shrink 비율만큼 줄여서 쓴다. 영상은 cell 화소 격자로 줄여 계산한다.
@@ -711,15 +858,28 @@ def actor_state(actors: list[Actor], t: float):
     return np.array(xs), np.array(ys), np.array(ep, dtype=int), np.array(alive, dtype=bool)
 
 
-def build_truth(layout: Layout, scenario: Scenario, fps: float, ego_body: bool = True, occlusion: bool = True,
+def build_truth(layout: Layout, scenario: Scenario, fps: float, ego_body: bool = True, occlusion: bool | str = "exact",
                 skew: bool = True, rule: str = "partial", contact: str = "keep") -> tuple[list[Camera], list[FrameTruth]]:
     """장면을 fps 간격으로 훑어 프레임마다 카메라별 정답 상자를 만든다(잡음과 놓침은 아직 없음).
 
+    occlusion: 물체끼리 가리는 것을 어떻게 볼지.
+             "exact" 시선이 다른 물체의 덩어리(occluder_boxes)를 지나는 겉면 점을 뺀다. 반쯤 가린 물체는 보이는
+                     부분만 상자가 되고 보이는 비율이 줄어 검출 확률이 낮아진다(기본).
+             "box"   더 가까운 물체의 영상 상자에 넓이의 60% 넘게 덮인 물체를 통째로 뺀다(예전 어림 방식).
+             "none"  가리지 않는다.
+             True는 "exact", False는 "none"과 같다. rule이 "full"이면 겉면 점이 없으므로 "exact" 대신 "box"를 쓴다.
     contact: "keep"이면 접지점이 잘린 상자도 그대로 둔다(파이프라인이 잘린 자리로 거리를 계산해 위치가 어긋난다).
              "drop"이면 접지점이 보이지 않는 상자를 뺀다(SimWorld의 규칙과 같은 보수적인 기준).
     """
     if contact not in ("keep", "drop"):
         raise ValueError(f"contact는 keep 또는 drop이어야 합니다: {contact}")
+    occlusion = {True: "exact", False: "none"}.get(occlusion, occlusion)
+    if occlusion not in ("exact", "box", "none"):
+        raise ValueError(f"occlusion은 exact, box, none 가운데 하나여야 합니다: {occlusion}")
+    if occlusion == "exact" and rule == "full":
+        occlusion = "box"
+    labels = [a.label for a in scenario.actors]
+    along_y = [a.along_y for a in scenario.actors]
     cams = layout.cameras()
     clips = layout.h_clips()
     skews = cam_skew_s(layout) if skew else [0.0] * len(cams)
@@ -737,12 +897,14 @@ def build_truth(layout: Layout, scenario: Scenario, fps: float, ego_body: bool =
                 xk, yk, ak = x, y, alive
             xs = np.where(ak, xk, 1e6)
             ys = np.where(ak, yk, 1e6)
+            blockers = occluder_boxes(labels, xs, ys, sizes[:, 0], sizes[:, 1], sizes[:, 2], along_y) \
+                if occlusion == "exact" else None
             boxes, ok, frac, touch = object_boxes(cam, xs, ys, sizes[:, 0], sizes[:, 1], sizes[:, 2], rule, ego_body,
-                                                  h_clip=clip)
+                                                  h_clip=clip, blockers=blockers)
             ok &= ak
             if contact == "drop":
                 ok &= touch
-            if occlusion:
+            if occlusion == "box":
                 dist = np.hypot(xs - cam.position[0], ys - cam.position[1])
                 ok &= ~occluded_by_others(boxes, ok, dist, cam.width, cam.height)
             idx = np.nonzero(ok)[0]
@@ -844,13 +1006,28 @@ def band_of(x: float, y: float) -> str:
     return "near" if d <= 5.0 else ("mid" if d <= 15.0 else "far")
 
 
-def match_radius(x: float, y: float, label: str = "car") -> float:
-    """정답과 트랙을 같은 물체로 볼 최대 거리(m).
+LONG_VEHICLES = ("truck", "bus")
 
-    scripts/eval_tracking.py의 기준(가까우면 3m, 멀면 거리의 20%)에 긴 차를 위한 항을 더했다.
-    트럭이나 버스는 트랙이 차체 위에 있어도 중심에서 3m 넘게 떨어질 수 있어 길이 절반 + 0.75m까지 허용한다.
+
+def match_radius(x: float, y: float) -> float:
+    """정답과 트랙을 같은 물체로 볼 최대 거리(m). scripts/eval_tracking.py와 같다(가까우면 3m, 멀면 거리의 20%)."""
+    return max(3.0, 0.2 * math.hypot(x, y))
+
+
+def body_distance(tx: float, ty: float, x: float, y: float, label: str, sx: float, sy: float) -> float:
+    """트랙 위치(tx, ty)가 물체에서 떨어진 거리(m). sx, sy는 물체의 X방향, Y방향 길이다.
+
+    보통은 물체 중심까지의 거리다. 트럭과 버스는 차체가 길어 트랙이 차체 옆에 붙어 있어도 중심에서는 3m 넘게
+    떨어질 수 있으므로, 길이 방향 중심선(양 끝을 폭의 절반씩 줄인 선분)까지의 거리로 잰다.
     """
-    return max(3.0, 0.2 * math.hypot(x, y), SIZES.get(label, SIZES["car"])[0] / 2.0 + 0.75)
+    dx, dy = abs(tx - x), abs(ty - y)
+    if label in LONG_VEHICLES:
+        half = abs(sx - sy) / 2.0
+        if sx >= sy:
+            dx = max(dx - half, 0.0)
+        else:
+            dy = max(dy - half, 0.0)
+    return math.hypot(dx, dy)
 
 
 def _group(label: str) -> str:
@@ -859,7 +1036,11 @@ def _group(label: str) -> str:
 
 @dataclass
 class Metrics:
-    """화면 범위 안 물체 기준 지표. 범위는 탑뷰(grid)와 3D 화면 전방(grid 앞끝~far_x, 옆 far_y 이내)이다."""
+    """화면 범위 안 물체 기준 지표. 범위는 탑뷰(grid)와 3D 화면 전방(grid 앞끝~far_x, 옆 far_y 이내)이다.
+
+    표시 비율과 끊김은 탑뷰 범위 안의 물체로, 먼 앞쪽 비율은 3D 화면 전방의 물체로 센다. ID 바뀜은 화면 범위 안에
+    있는 물체의 것만, 중복과 헛 표시는 화면 범위 안에 그려지는 트랙만 센다(화면 밖에서 일어난 일은 보이지 않는다).
+    """
 
     grid: BevGrid
     dt: float
@@ -893,19 +1074,28 @@ class Metrics:
         seen = {e[0] for per in truth.cams for e in per}
         gts = [(i, actors[i].label, float(truth.xy[i, 0]), float(truth.xy[i, 1]))
                for i in range(len(actors)) if truth.alive[i] and math.hypot(*truth.xy[i]) <= 70.0]
-        # 일대일 짝짓기(가까운 쌍부터)
-        pairs = []
+        sizes = [actors[i].size() for i, _, _, _ in gts]
+        # 정답과 트랙 사이 거리(같은 종류이고 반경 안일 때만)
+        dist = {}
         for gi, (_, lab, x, y) in enumerate(gts):
-            r = match_radius(x, y, lab)
+            r = match_radius(x, y)
             for ti, t in enumerate(tracks):
                 if _group(t.label) != _group(lab):
                     continue
-                d = math.hypot(float(t.xy[0]) - x, float(t.xy[1]) - y)
+                d = body_distance(float(t.xy[0]), float(t.xy[1]), x, y, lab, sizes[gi][0], sizes[gi][1])
                 if d < r:
-                    pairs.append((d, gi, ti))
-        pairs.sort()
+                    dist[(gi, ti)] = d
+        # 일대일 짝짓기. 지난 프레임에 짝이던 트랙이 아직 반경 안에 있으면 그대로 두고, 나머지는 가까운 쌍부터 잇는다.
+        # 한 물체에 트랙이 둘 붙어 있을 때 프레임마다 더 가까운 쪽으로 짝이 오가는 것을 ID 바뀜으로 세지 않기 위해서다.
         used_g, used_t, assign = set(), set(), {}
-        for d, gi, ti in pairs:
+        by_tid = {t.tid: ti for ti, t in enumerate(tracks)}
+        for gi, (i, _, _, _) in enumerate(gts):
+            ti = by_tid.get(self._last.get((i, int(truth.epoch[i]))))
+            if ti is not None and ti not in used_t and (gi, ti) in dist:
+                used_g.add(gi)
+                used_t.add(ti)
+                assign[gi] = (tracks[ti].tid, dist[(gi, ti)])
+        for d, gi, ti in sorted((d, gi, ti) for (gi, ti), d in dist.items()):
             if gi in used_g or ti in used_t:
                 continue
             used_g.add(gi)
@@ -915,12 +1105,14 @@ class Metrics:
         for gi, (i, lab, x, y) in enumerate(gts):
             key = (i, int(truth.epoch[i]))
             hit = assign.get(gi)
+            on_screen = self.in_bev(x, y) or self.in_far(x, y)
             if hit is not None:
                 prev = self._last.get(key)
-                if prev is not None and prev != hit[0]:
+                if prev is not None and prev != hit[0] and on_screen:
                     self.switches += 1
                 self._last[key] = hit[0]
-                self._ids.setdefault(key, set()).add(hit[0])
+                if on_screen:
+                    self._ids.setdefault(key, set()).add(hit[0])
             if self.in_far(x, y):
                 self.far_total += 1
                 self.far_shown += hit is not None
@@ -944,13 +1136,12 @@ class Metrics:
         # 화면 범위를 벗어난 물체의 끊김 구간은 거기서 끝난 것으로 센다
         for key in [k for k in self._run if k not in live_keys]:
             self.gaps.append(self._run.pop(key) * self.dt)
+        # 짝이 없는 트랙: 화면 범위 안에 그려지는 것만 센다. 같은 종류의 물체 곁에 있으면 중복, 아니면 헛 표시다
         for ti, t in enumerate(tracks):
-            if ti in used_t:
+            tx, ty = float(t.xy[0]), float(t.xy[1])
+            if ti in used_t or not (self.in_bev(tx, ty) or self.in_far(tx, ty)):
                 continue
-            near = any(_group(t.label) == _group(lab) and
-                       math.hypot(float(t.xy[0]) - x, float(t.xy[1]) - y) < match_radius(x, y, lab)
-                       for _, lab, x, y in gts)
-            if near:
+            if any((gi, ti) in dist for gi in range(len(gts))):
                 self.dup += 1
             else:
                 self.false_tracks += 1
@@ -1018,6 +1209,20 @@ def noisy_detections(cams: list[Camera], truth: FrameTruth, actors: list[Actor],
     return out
 
 
+def difficulty_factors(cams: list[Camera], n_actors: int, sigma: float, seed: int) -> np.ndarray:
+    """(카메라, 물체)별 고정 크기 배율. 같은 seed에서 같은 이름의 카메라는 배치가 달라도 같은 값을 받는다.
+
+    카메라 순서로 뽑으면 4대 배치의 후방 카메라와 5대 배치의 전방 메인 카메라가 같은 값을 받게 되어,
+    배치를 비교할 때 카메라 구성과 상관없는 차이가 섞인다.
+    """
+    out = np.ones((len(cams), n_actors))
+    if sigma > 0:
+        for k, cam in enumerate(cams):
+            rng = np.random.default_rng([int(seed), zlib.crc32(cam.name.encode("utf-8"))])
+            out[k] = np.exp(rng.normal(0.0, sigma, n_actors))
+    return out
+
+
 def run_once(layout: Layout, scenario: Scenario, det: DetModel, fps: float, seed: int, grid: BevGrid | None = None,
              truth: tuple[list[Camera], list[FrameTruth]] | None = None, tracker_mode: str = "robust",
              vehicle_center: str = "ray", **truth_opts) -> dict:
@@ -1025,8 +1230,7 @@ def run_once(layout: Layout, scenario: Scenario, det: DetModel, fps: float, seed
     grid = grid or BevGrid()
     cams, frames = truth if truth is not None else build_truth(layout, scenario, fps, **truth_opts)
     rng = np.random.default_rng(seed)
-    factors = np.exp(rng.normal(0.0, det.difficulty_sigma, (len(cams), len(scenario.actors)))) \
-        if det.difficulty_sigma > 0 else np.ones((len(cams), len(scenario.actors)))
+    factors = difficulty_factors(cams, len(scenario.actors), det.difficulty_sigma, seed)
     tracker = BevTracker(mode=tracker_mode)
     dt = 1.0 / fps
     m = Metrics(grid, dt)
@@ -1083,16 +1287,25 @@ class FpsModel:
     """카메라 수에 따른 루프 시간(ms)과 FPS.
 
     기본 시간 = base_ms + per_cam_ms x N. 파이 실측 두 점을 잇는 직선이다: 2대 38.2ms(03번 측정),
-    4대 62.2ms(14번 측정의 두 실행 61.6, 62.8ms의 가운데). 둘 다 Hailo 검출만, 탑뷰 화면이다.
-    그 밖의 항은 실측이 없는 어림이다.
+    4대 62.2ms(14번 측정의 두 실행 61.6, 62.8ms의 가운데). 둘 다 Hailo 검출만, 탑뷰 화면, 바닥 영상을 켠 상태다.
+    5대부터는 실측이 없어 이 직선을 늘린 값이고, 그 밖의 항도 실측이 없는 어림이다.
+      ground   : 탑뷰 바닥에 카메라 영상을 까는지. 끄면(run_demo.py --no-ground) 바닥 합성 단계가 빠진다.
+                 이 단계의 실측은 2대 9.5ms, 4대 19.8ms라서 ground_base_ms + ground_per_cam_ms x N으로 본다.
+      resize_ms: USB 카메라 한 대의 영상을 설정 크기로 줄이는 시간. 주 스레드에서 돌아 루프 시간에 그대로 더해진다.
       decode_ms: USB 카메라 한 프레임의 MJPEG 해제 시간. 해제는 카메라별 스레드에서 카메라 속도(cam_fps)로 돌아
-                 루프 시간에 바로 더해지지 않고, 코어를 나눠 쓰는 만큼(coupling) 루프를 늦춘다.
+                 루프 시간에 바로 더해지지 않고, 코어를 나눠 쓰는 만큼(coupling) 루프를 늦춘다. 4대 실측은 가짜 USB
+                 카메라 2대가 영상 파일을 푸는 상태에서 잰 값이라, 그 시간(decode_in_base_ms, 추정)을 넘는 만큼만 센다.
       seg      : DX-M1 도로 세그를 함께 돌리는 경우. 2대 실측(38.2 -> 51.0ms)에 맞춘 식이다.
     """
 
     base_ms: float = 14.2
     per_cam_ms: float = 12.0
+    ground: bool = True
+    ground_base_ms: float = -0.8
+    ground_per_cam_ms: float = 5.15
+    resize_ms: float = 0.0
     decode_ms: float = 0.0
+    decode_in_base_ms: float = 1.5
     coupling: float = 0.4
     cores: float = 4.0
     cam_fps: float = 30.0
@@ -1100,11 +1313,14 @@ class FpsModel:
 
     def frame_ms(self, n: int, n_usb: int = 0) -> float:
         t = self.base_ms + self.per_cam_ms * n
+        if not self.ground:
+            t -= self.ground_base_ms + self.ground_per_cam_ms * n
+        t += self.resize_ms * n_usb
         cores = self.cores
         if self.seg:
-            t = 1.13 * t + 2.7 * n + 2.0
+            t = 1.13 * t + 2.7 * n + 2.4
             cores -= 0.5
-        busy = n_usb * self.cam_fps * self.decode_ms / 1000.0  # 해제 스레드가 붙잡는 코어 수
+        busy = n_usb * self.cam_fps * max(self.decode_ms - self.decode_in_base_ms, 0.0) / 1000.0  # 해제 스레드가 붙잡는 코어 수
         return t * (1.0 + self.coupling * busy / max(cores - busy, 0.5))
 
     def fps(self, n: int, n_usb: int = 0) -> float:
