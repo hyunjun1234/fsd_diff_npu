@@ -5,6 +5,8 @@
 ## 문서
 
 - [FSD v15 리얼리티 뷰 기술 조사](docs/01_fsd_v15_reality_view_research.md): 처리 과정, 사용 모델, HW3, AI4, AI5 칩의 구조와 성능, 카메라 사양
+- [테슬라 3B 주행 모델과 1B 확산 렌더러](docs/09_tesla_3b_1b_models.md): 공개된 내용, 테슬라 렌더러 규모 역산, 데이터와 학습 연산량과 엣지 배포 면에서 직접 만들 수 있는지
+- [축소판 생성형 리얼리티 뷰 구현 계획](docs/10_mini_reality_view_build_plan.md): 공유 인코더, 작은 오토인코더, 한 단계 생성기를 파이 5와 DX-M1에 올리는 G1~G6 단계와 완료 기준
 - [엣지 NPU 사양 비교](docs/02_edge_npu_spec_comparison.md): Hailo-8, 8L, 10H와 DEEPX DX-M1의 사양, 테슬라 AI4의 리얼리티 뷰 연산량과의 비교
 - [테슬라 카메라 배치와 시야](docs/04_tesla_camera_layout.md): 카메라별 장착 위치, 방향, 화각, 최대 거리와 3D 도면([viz/tesla_camera_layout_3d.html](viz/tesla_camera_layout_3d.html))
 - [테슬라 카메라 자리별 파이 5 카메라 선정](docs/06_pi5_camera_selection.md): 자리별 추천 제품, 화각과 HDR, 저조도 비교, 3대 이상 연결 방법, 국내 가격
